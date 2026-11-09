@@ -1,0 +1,104 @@
+#Requires -Version 5.1
+<#
+  End-to-end smoke test: real model calls, real snapshot, real resume.
+  Uses a throwaway background session in .test\smoke and removes it afterwards.
+#>
+[CmdletBinding()]
+param([string]$Model = 'haiku')
+
+$root = Split-Path -Parent $PSScriptRoot
+$encore = Join-Path $root 'encore.ps1'
+$dir = Join-Path $root '.test\smoke'
+$codeword = 'TANGERINE-' + ([char[]]'QUAY' -join '')
+$fail = 0
+$id = $null
+
+function Step { param($m) Write-Host "`n== $m" }
+function Check { param($cond, $m)
+    if ($cond) { Write-Host "  ok   $m" }
+    else { Write-Host "  FAIL $m" -ForegroundColor Red; $script:fail++ }
+}
+function Invoke-Encore { param([string[]]$A)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $encore @A
+}
+
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+try {
+    Step 'start a background session with a real model call'
+    Push-Location $dir
+    try { $out = & claude --bg --model $Model "Remember the codeword $codeword. Reply with READY only." 2>&1 } finally { Pop-Location }
+    $out = $out -join "`n"
+    if ($out -match 'not trusted') {
+        Write-Host $out
+        Write-Host "`nTrust $dir once (run 'claude' there and accept), then re-run." -ForegroundColor Yellow
+        exit 2
+    }
+    $id = [regex]::Match($out, 'claude stop ([0-9a-f]{8})').Groups[1].Value
+    Check ($id -ne '') "session started ($id)"
+    if (-not $id) { throw "could not parse session id from: $out" }
+
+    Step 'wait for the session to finish its turn'
+    $deadline = (Get-Date).AddMinutes(3)
+    $row = $null
+    do {
+        Start-Sleep -Seconds 2
+        $live = claude agents --json | ConvertFrom-Json
+        $row = $live | Where-Object { $_.id -eq $id }
+    } until ($row.state -eq 'done' -or $row.state -eq 'idle' -or (Get-Date) -gt $deadline)
+    Check ($row.state -eq 'done' -or $row.state -eq 'idle') "session settled (state=$($row.state))"
+
+    $full = $row.sessionId
+
+    Step 'snapshot it'
+    Invoke-Encore @('save', '--kinds', 'background', '--quiet')
+    $snaps = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Encore\snapshots') -Filter '*.json' -ErrorAction SilentlyContinue)
+    Check ($snaps.Count -gt 0) "snapshot written ($($snaps.Count) total)"
+
+    Step 'stop the session and check it shows up as closed'
+    claude stop $id | Out-Null
+    Start-Sleep -Seconds 3
+    $listed = (Invoke-Encore @('list', '--ids', '--kinds', 'background', '--since', '10m')) -join "`n"
+    Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
+    Check ($listed -match 'closed') 'it is reported as closed'
+
+    Step 'dry run plans the right command'
+    $plan = (Invoke-Encore @('restore', '--dry-run', '--kinds', 'background', '--since', '10m', '--project', $dir)) -join "`n"
+    Check ($plan -match "--resume $full") 'plan resumes the right id'
+    Check ($plan -match 'Continue from where you left off\.') 'plan sends the continuation prompt'
+
+    Step 'resume refreshes the conversation (real model call)'
+    Push-Location $dir
+    try {
+        $json = & claude -p --model $Model --output-format json --resume $full "What was the codeword? Reply with the codeword only." 2>&1
+    } finally { Pop-Location }
+    $reply = ''
+    try { $reply = ($json -join "`n" | ConvertFrom-Json).result } catch { $reply = ($json -join "`n") }
+    Check ($reply -match [regex]::Escape($codeword)) "model recalled the codeword"
+
+    Step 'encore restore actually opens a resuming terminal'
+    Invoke-Encore @('restore', '--kinds', 'background', '--since', '10m', '--project', $dir) | Out-Null
+    $proc = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Seconds 2
+        $proc = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
+            Where-Object { $_.CommandLine -like "*--resume $full*" } | Select-Object -First 1
+    } until ($proc -or (Get-Date) -gt $deadline)
+    Check ($null -ne $proc) "a terminal is running claude --resume $full"
+}
+finally {
+    Step 'cleanup'
+    if ($id) {
+        Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
+            Where-Object { $_.CommandLine -like "*$id*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Push-Location $dir
+        try { claude rm $id 2>$null | Out-Null } finally { Pop-Location }
+        Write-Host "  removed test session $id"
+    }
+}
+
+Write-Host ''
+if ($fail -eq 0) { Write-Host 'SMOKE PASSED' -ForegroundColor Green; exit 0 }
+Write-Host "$fail check(s) failed" -ForegroundColor Red; exit 1
