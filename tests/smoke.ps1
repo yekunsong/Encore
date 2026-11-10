@@ -60,12 +60,12 @@ try {
     Step 'stop the session and check it shows up as closed'
     claude stop $id | Out-Null
     Start-Sleep -Seconds 3
-    $listed = (Invoke-Encore @('list', '--ids', '--kinds', 'background', '--since', '10m')) -join "`n"
+    $listed = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m')) -join "`n"
     Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
     Check ($listed -match 'closed') 'it is reported as closed'
 
     Step 'dry run plans the right command'
-    $plan = (Invoke-Encore @('restore', '--dry-run', '--kinds', 'background', '--since', '10m', '--project', $dir)) -join "`n"
+    $plan = (Invoke-Encore @('restore', '--dry-run', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     Check ($plan -match "--resume $full") 'plan resumes the right id'
     Check ($plan -match 'Continue from where you left off\.') 'plan sends the continuation prompt'
 
@@ -81,7 +81,7 @@ try {
     Step 'restore modes are configurable'
     $modes = @{}
     foreach ($m in 'tabs', 'windows', 'background') {
-        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--mode', $m, '--kinds', 'background', '--since', '10m', '--project', $dir)) -join "`n"
+        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     }
     Check ($modes['tabs'] -match 'powershell -NoExit') 'tabs mode plans a console'
     Check ($modes['windows'] -match 'new-window') 'windows mode plans a new window'
@@ -91,7 +91,7 @@ try {
     Invoke-Encore @('config', 'mode', 'tabs') | Out-Null
 
     Step 'background mode restores without a terminal (real model call)'
-    Invoke-Encore @('restore', '--mode', 'background', '--kinds', 'background', '--since', '10m', '--project', $dir) | Out-Null
+    Invoke-Encore @('restore', '--mode', 'background', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
     $deadline = (Get-Date).AddSeconds(40)
     $bgRow = $null
     do {
@@ -100,10 +100,19 @@ try {
         $bgRow = $live | Where-Object { $_.sessionId -eq $full -and $_.kind -eq 'background' }
     } until ($bgRow -or (Get-Date) -gt $deadline)
     Check ($null -ne $bgRow) 'session runs in the background with no window'
-    if ($bgRow) { claude stop $bgRow.id 2>$null | Out-Null }
+    if ($bgRow) {
+        claude stop $bgRow.id 2>$null | Out-Null
+        $deadline = (Get-Date).AddSeconds(15)
+        do {
+            Start-Sleep -Seconds 1
+            $live = claude agents --json | ConvertFrom-Json
+            $still = $live | Where-Object { $_.sessionId -eq $full }
+        } until (-not $still -or (Get-Date) -gt $deadline)
+        Check (-not $still) 'background copy stopped again'
+    }
 
     Step 'encore restore actually opens a resuming terminal'
-    Invoke-Encore @('restore', '--kinds', 'background', '--since', '10m', '--project', $dir) | Out-Null
+    Invoke-Encore @('restore', '--include-open', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
     $proc = $null
     $deadline = (Get-Date).AddSeconds(30)
     do {
