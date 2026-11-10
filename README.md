@@ -78,11 +78,16 @@ marker. Change it with `--prompt "text"`, drop it with `--prompt ""`.
 
 ## How it works
 
-Candidates come from the newest snapshot in `%LOCALAPPDATA%\Encore\snapshots`
-(protects the record from Claude Code's own startup cleanup) and from
-`~/.claude/sessions\*.json`, which survives a reboot. Each one resumes with
-`claude --resume <id>` in its own folder; liveness is checked per session id and
-PID. Nothing leaves the machine and no transcript is written.
+Claude deletes the session record of a dead process at next startup, so Encore
+keeps its own copy: a `SessionStart` hook appends `session id + folder + time` to
+`%LOCALAPPDATA%\Encore\index.jsonl` the instant a session starts — no polling and
+no window in which a session can be lost. Live `~/.claude/sessions\*.json`
+records and the newest snapshot are read too, so sessions started before the hook
+was installed still restore.
+
+Each candidate resumes with `claude --resume <id>` in its own folder; liveness is
+checked per session id and PID. Nothing leaves the machine and no transcript is
+written.
 
 ## Limitations
 
@@ -91,7 +96,9 @@ PID. Nothing leaves the machine and no transcript is written.
 - Flags not stored with a session (`--add-dir`, `--mcp-config`, `--settings`,
   `--plugin-dir`, `--fallback-model`) are not re-applied.
 - `claude stop` deletes the session record, so a stopped session only restores
-  from an older snapshot.
+  from the index or a snapshot.
+- Sessions started with hooks disabled (`--bare`, `--safe-mode`, `/config`
+  toggles) are recorded only by the fallback sources.
 
 ## Testing
 

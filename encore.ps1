@@ -178,8 +178,19 @@ function Get-SnapshotFiles {
 }
 
 function Read-SessionRecords {
-    <# Every restorable record: on-disk ones plus the newest snapshot. #>
+    <# Every restorable record: hook index, newest snapshot, on-disk ones. #>
     $map = @{}
+    $idx = Join-Path $script:AppDir 'index.jsonl'
+    if (Test-Path -LiteralPath $idx) {
+        foreach ($ln in (Get-Content -LiteralPath $idx -Tail 2000 -ErrorAction SilentlyContinue)) {
+            try { $r = $ln | ConvertFrom-Json } catch { continue }
+            if (-not $r.id) { continue }
+            $map[[string]$r.id] = [pscustomobject]@{
+                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = 'interactive'
+                startedAt = ConvertTo-EpochMs $r.startedAt; updatedAt = ConvertTo-EpochMs $r.startedAt; pid = 0
+            }
+        }
+    }
     $snap = Get-SnapshotFiles | Select-Object -First 1
     if ($snap) {
         try { foreach ($e in @((Get-Content -LiteralPath $snap.FullName -Raw | ConvertFrom-Json).entries)) {
@@ -443,6 +454,7 @@ function Invoke-Install {
     $bin = Join-Path $script:AppDir 'bin'
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
     Copy-Item -LiteralPath (Join-Path $here 'encore.ps1') -Destination $bin -Force
+    Copy-Item -LiteralPath (Join-Path $here 'encore-hook.ps1') -Destination $bin -Force
     $shim = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0encore.ps1`" %*`r`n"
     Set-Content -LiteralPath (Join-Path $bin 'encore.cmd') -Value $shim -Encoding ASCII -NoNewline
 
@@ -452,7 +464,20 @@ function Invoke-Install {
         Write-Info "added $bin to your user PATH (open a new terminal to use it)"
     }
 
-    if ($Opts['no-task'] -ne $true) {
+    $settingsFile = Join-Path (Get-ClaudeConfigDir) 'settings.json'
+    $hookCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $bin 'encore-hook.ps1') + '"'
+    $cfg = if (Test-Path -LiteralPath $settingsFile) { Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+    if (-not $cfg.PSObject.Properties['hooks']) { $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
+    if (-not $cfg.hooks.PSObject.Properties['SessionStart']) { $cfg.hooks | Add-Member -NotePropertyName SessionStart -NotePropertyValue @() }
+    $entry = [pscustomobject]@{ matcher = 'startup|resume|fork'; hooks = @([pscustomobject]@{ type = 'command'; command = $hookCmd; timeout = 10 }) }
+    $already = @($cfg.hooks.SessionStart) | Where-Object { (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' }) }
+    if (-not $already) {
+        $cfg.hooks.SessionStart = @($cfg.hooks.SessionStart) + $entry
+        [IO.File]::WriteAllText($settingsFile, ($cfg | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        Write-Info "registered SessionStart hook in $settingsFile"
+    }
+
+    if ($Opts['task'] -eq $true) {
         $ps1 = Join-Path $bin 'encore.ps1'
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
             -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" save --quiet' -f $ps1)
@@ -461,13 +486,27 @@ function Invoke-Install {
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName 'Encore-Autosave' -Action $action -Trigger $trigger `
             -Settings $settings -Description 'Snapshot open Claude Code sessions' -Force | Out-Null
-        Write-Info 'registered autosave task (every 15 minutes while logged in)'
+        Write-Info 'registered autosave task (backstop, every 15 minutes)'
+    } else {
+        Unregister-ScheduledTask -TaskName 'Encore-Autosave' -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Info 'hook records sessions as they start (no polling task)'
     }
     Write-Info 'installed. Try: encore list'
 }
 
 function Invoke-Uninstall {
     Unregister-ScheduledTask -TaskName 'Encore-Autosave' -Confirm:$false -ErrorAction SilentlyContinue
+    $settingsFile = Join-Path (Get-ClaudeConfigDir) 'settings.json'
+    if (Test-Path -LiteralPath $settingsFile) {
+        try {
+            $cfg = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+            $ss = @($cfg.hooks.SessionStart) | Where-Object {
+                -not (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' })
+            }
+            $cfg.hooks.SessionStart = @($ss)
+            [IO.File]::WriteAllText($settingsFile, ($cfg | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        } catch { Write-Warn "could not edit $settingsFile; remove the encore hook by hand" }
+    }
     $bin = Join-Path $script:AppDir 'bin'
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath -like "*$bin*") {
@@ -520,7 +559,7 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore save                      snapshot what is open right now
   encore config [key value]        show or set config (e.g. config mode windows)
   encore doctor                    check the install
-  encore install [--no-task]       put encore on PATH (+ 15-min autosave task)
+  encore install [--task]          PATH + SessionStart hook (--task adds a 15-min backstop)
   encore uninstall                 undo install
 
 filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
