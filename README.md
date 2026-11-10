@@ -62,9 +62,32 @@ sessions every 15 minutes. Open a new terminal afterwards.
 | `encore restore --dry-run` | Print the commands, launch nothing |
 | `encore restore --project D:\work\api` | Only that tree |
 | `encore restore --since 2d --limit 10` | Narrow the window |
+| `encore restore --mode background` | Resume with no terminal, then `claude attach <id>` |
+| `encore config mode windows` | Persist how restore opens terminals |
 | `encore save` | Snapshot what is open right now |
+| `encore config mode windows` | Persist a default restore mode |
 | `encore doctor` | Check the installation |
 | `encore uninstall` | Remove PATH entry and task |
+
+### Restore modes
+
+Pick how a restore lands, per run or as a default:
+
+| Mode | Result | Set per run | Persist |
+| --- | --- | --- | --- |
+| `tabs` (default) | every session as a tab in your current terminal window | `--tabs` | `encore config mode tabs` |
+| `windows` | one window per session (Windows Terminal `new-window`) | `--windows` | `encore config mode windows` |
+| `background` | no terminal at all — sessions run headless, reached with `claude attach <id>` | `--background` | `encore config mode background` |
+
+`background` is the quietest: nothing pops up, and `encore restore --background`
+prints the `claude attach` line for each session it starts. Resuming a session
+that is already running in the background starts a *copy* rather than stealing
+the original — the same rule the CLI applies.
+
+`tabs` relies on Windows 11's default-terminal delegation. `windows` uses
+Windows Terminal's CLI; if your Terminal build ignores the trailing command (the
+window opens but the shell stays empty) Encore detects it and falls back to plain
+windows, warning once per run.
 
 Sessions that are **still running are skipped**, so running `encore restore`
 from inside a live Claude Code session never forks the conversation out from
@@ -86,6 +109,8 @@ prompt with `--prompt "text"` / `--no-prompt`.
 --prompt <text>             prompt sent on resume
 --no-prompt                 resume without sending a turn
 --include-open              also reopen sessions that are still running
+--mode tabs|windows|background   restore mode for this run
+--tabs / --windows / --background  shorthand for --mode
 --yolo                      add --dangerously-skip-permissions
 --wt                        force Windows Terminal instead of a new console
 --window                    new window rather than tab (with --wt)

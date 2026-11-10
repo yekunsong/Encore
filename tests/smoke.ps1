@@ -76,6 +76,30 @@ try {
     try { $reply = ($json -join "`n" | ConvertFrom-Json).result } catch { $reply = ($json -join "`n") }
     Check ($reply -match [regex]::Escape($codeword)) "model recalled the codeword"
 
+    Step 'restore modes are configurable'
+    $modes = @{}
+    foreach ($m in 'tabs', 'windows', 'background') {
+        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--mode', $m, '--kinds', 'background', '--since', '10m', '--project', $dir)) -join "`n"
+    }
+    Check ($modes['tabs'] -match 'powershell -NoExit') 'tabs mode plans a console'
+    Check ($modes['windows'] -match 'new-window') 'windows mode plans a new window'
+    Check ($modes['background'] -match '--bg') 'background mode plans a headless resume'
+    Invoke-Encore @('config', 'mode', 'background') | Out-Null
+    Check (((Invoke-Encore @('config', 'mode')) -join ' ') -match 'background') 'mode persists in config'
+    Invoke-Encore @('config', 'mode', 'tabs') | Out-Null
+
+    Step 'background mode restores without a terminal (real model call)'
+    Invoke-Encore @('restore', '--mode', 'background', '--kinds', 'background', '--since', '10m', '--project', $dir) | Out-Null
+    $deadline = (Get-Date).AddSeconds(40)
+    $bgRow = $null
+    do {
+        Start-Sleep -Seconds 2
+        $live = claude agents --json | ConvertFrom-Json
+        $bgRow = $live | Where-Object { $_.sessionId -eq $full -and $_.kind -eq 'background' }
+    } until ($bgRow -or (Get-Date) -gt $deadline)
+    Check ($null -ne $bgRow) 'session runs in the background with no window'
+    if ($bgRow) { claude stop $bgRow.id 2>$null | Out-Null }
+
     Step 'encore restore actually opens a resuming terminal'
     Invoke-Encore @('restore', '--kinds', 'background', '--since', '10m', '--project', $dir) | Out-Null
     $proc = $null

@@ -33,7 +33,10 @@ function Get-Opt {
     $o = @{}
     for ($i = 0; $i -lt $ArgList.Count; $i++) {
         $a = $ArgList[$i]
-        if ($a -notmatch '^--') { continue }
+        if ($a -notmatch '^--') {
+            $o["Positional$($o.Keys.Count)"] = $a
+            continue
+        }
         $name = $a.Substring(2); $val = $true
         if ($name -match '^(?<k>[^=]+)=(?<v>.*)$') { $name = $Matches.k; $val = $Matches.v }
         elseif ($i + 1 -lt $ArgList.Count -and $ArgList[$i + 1] -notmatch '^--') { $val = $ArgList[$i + 1]; $i++ }
@@ -49,6 +52,56 @@ function Resolve-Kinds {
         $k = $_.Trim()
         if ($k -eq 'bg') { 'background' } else { $k }
     })
+}
+
+function Get-ConfigPath { Join-Path $script:AppDir 'config.json' }
+
+function Get-Config {
+    $f = Get-ConfigPath
+    if (-not (Test-Path -LiteralPath $f)) { return @{} }
+    try {
+        $o = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+        $h = @{}
+        foreach ($pr in $o.PSObject.Properties) { $h[$pr.Name] = [string]$pr.Value }
+        return $h
+    } catch { return @{} }
+}
+
+function Set-ConfigKey {
+    param([string]$Key, [string]$Value)
+    $cfg = Get-Config
+    $cfg[$Key] = $Value
+    New-Item -ItemType Directory -Force -Path $script:AppDir | Out-Null
+    ($cfg | ConvertTo-Json -Depth 5) | ForEach-Object {
+        [IO.File]::WriteAllText((Get-ConfigPath), $_, (New-Object Text.UTF8Encoding($false)))
+    }
+}
+
+function Resolve-Mode {
+    param($Opts)
+    foreach ($m in 'tabs', 'windows', 'background') {
+        if ($Opts[$m] -eq $true) { return $m }
+    }
+    if ($Opts['mode']) {
+        $m = [string]$Opts['mode']
+        if (@('tab', 'tabs', 'window', 'windows', 'bg', 'background') -notcontains $m) {
+            Exit-With 1 "bad --mode '$m' (tabs | windows | background)"
+        }
+        if ($m -eq 'tab') { $m = 'tabs' }
+        if ($m -eq 'window') { $m = 'windows' }
+        if ($m -eq 'bg') { $m = 'background' }
+        return $m
+    }
+    $cfg = Get-Config
+    if ($cfg['mode']) {
+        $m = [string]$cfg['mode']
+        if (@('tabs', 'windows', 'background') -notcontains $m) {
+            Write-Warn "config mode '$m' is invalid; using tabs (fix: encore config mode tabs)"
+            return 'tabs'
+        }
+        return $m
+    }
+    return 'tabs'
 }
 
 function Get-ClaudePath {
@@ -267,11 +320,18 @@ function New-LaunchCommand {
     }
     $inner = "Set-Location -LiteralPath $cwd; claude --resume $($Entry.id)$flags$prompt"
     $title = if ($Entry.name) { $Entry.name } else { Split-Path -Leaf $Entry.cwd }
+    if ($title.Length -gt 40) { $title = $title.Substring(0, 39) + [char]0x2026 }
 
-    if ($Opts['wt'] -ne $true -or -not (Get-Command wt.exe -ErrorAction SilentlyContinue)) {
+    if ($Opts['mode'] -eq 'background') {
+        return [pscustomobject]@{ Kind = 'bg'; Inner = $inner; Argv = @() }
+    }
+
+    $useWt = ($Opts['mode'] -eq 'windows' -or $Opts['wt'] -eq $true) -and
+             (Get-Command wt.exe -ErrorAction SilentlyContinue)
+    if (-not $useWt) {
         return [pscustomobject]@{ Kind = 'process'; Inner = $inner; Argv = @() }
     }
-    $mode = if ($Opts['window'] -eq $true) { 'new-window' } else { 'new-tab' }
+    $mode = if ($Opts['mode'] -eq 'windows' -or $Opts['window'] -eq $true) { 'new-window' } else { 'new-tab' }
     $argv = @('-w', '0', $mode, '-d', $Entry.cwd, '--title', "encore: $title", '--',
               'powershell.exe', '-NoExit', '-Command', $inner)
     return [pscustomobject]@{ Kind = 'wt'; Inner = $inner; Argv = $argv }
@@ -307,35 +367,98 @@ function Invoke-List {
 
 function Invoke-Restore {
     param($Opts)
+    $Opts['mode'] = Resolve-Mode $Opts
+    $promptText = if ($Opts['prompt']) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
+
     $items = @(Select-Candidates $Opts)
     if ($items.Count -eq 0) { Exit-With 0 'nothing to restore' }
     if ($script:MissingCwd.Count) { Write-Warn ("{0} session(s) skipped: folder gone" -f $script:MissingCwd.Count) }
 
-    Write-Info ('{0} session(s) to reopen:' -f $items.Count)
+    Write-Info ('{0} session(s) to reopen [{1} mode]:' -f $items.Count, $Opts['mode'])
     Show-Plan $items
     Write-Info ''
 
     if ($Opts['dry-run'] -eq $true) {
         foreach ($e in $items) {
             $c = New-LaunchCommand $e $Opts
-            if ($c.Kind -eq 'wt') { Write-Info ('  wt.exe ' + ($c.Argv -join ' ')) }
-            else { Write-Info ('  powershell -NoExit -Command "' + $c.Inner + '"') }
+            switch ($c.Kind) {
+                'wt'      { Write-Info ('  wt.exe ' + ($c.Argv -join ' ')) }
+                'bg'      { Write-Info ('  claude --resume {0} --bg "{1}"' -f $e.id, $promptText) }
+                default   { Write-Info ('  powershell -NoExit -Command "' + $c.Inner + '"') }
+            }
         }
         Exit-With 0 'dry run: nothing launched'
     }
 
+    $claude = Get-ClaudePath
     $opened = 0
+    $warnedFallback = $false
+
     foreach ($e in $items) {
         $c = New-LaunchCommand $e $Opts
         try {
-            if ($c.Kind -eq 'wt') { & wt.exe $c.Argv | Out-Null }
-            else { Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', $c.Inner | Out-Null }
-            $opened++
+            switch ($c.Kind) {
+                'bg' {
+                    Push-Location -LiteralPath $e.cwd
+                    $prevEap = $ErrorActionPreference
+                    $ErrorActionPreference = 'Continue'
+                    try { $out = & $claude --resume $e.id --bg $promptText 2>&1 }
+                    finally { $ErrorActionPreference = $prevEap; Pop-Location }
+                    $plain = (($out -join ' ') -replace ([char]27 + '\[[0-9;]*m'), '')
+                    $short = [regex]::Match($plain, 'claude attach ([0-9a-f]{8})').Groups[1].Value
+                    $copy = [regex]::Match($plain, 'copy as ([0-9a-f]{8})').Groups[1].Value
+                    if (-not $short) { throw ($plain -replace '\s+', ' ') }
+                    $note = if ($copy) { " (copy $copy)" } else { '' }
+                    Write-Info ('  running in background: claude attach {0}{1}  ({2})' -f $short, $note, $e.cwd)
+                    $opened++
+                }
+                'wt' {
+                    & wt.exe $c.Argv | Out-Null
+                    $deadline = (Get-Date).AddSeconds(4)
+                    do { Start-Sleep -Milliseconds 400 } until ((Get-Date) -gt $deadline)
+                    $live = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.CommandLine -like "*--resume $($e.id)*" }
+                    if (-not $live -and -not $warnedFallback) {
+                        Write-Warn 'Windows Terminal did not start the command; falling back to plain windows'
+                        $warnedFallback = $true
+                    }
+                    if (-not $live) {
+                        Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', $c.Inner | Out-Null
+                    }
+                    $opened++
+                }
+                default {
+                    Start-Process powershell.exe -ArgumentList '-NoExit', '-Command', $c.Inner | Out-Null
+                    $opened++
+                }
+            }
         } catch {
             Write-Warn ("could not open {0}: {1}" -f $e.cwd, $_.Exception.Message)
         }
     }
     Exit-With 0 ("reopened {0} session(s)" -f $opened)
+}
+
+function Invoke-Config {
+    param($Opts)
+    $key = $Opts['Positional0']
+    if (-not $key) {
+        $cfg = Get-Config
+        if (-not $cfg.Count) { Exit-With 0 'no config set (defaults: mode=tabs)'; }
+        foreach ($k in $cfg.Keys) { Write-Info ("{0} = {1}" -f $k, $cfg[$k]) }
+        exit 0
+    }
+    $value = $Opts['Positional1']
+    if (-not $value) {
+        $cfg = Get-Config
+        if ($cfg.ContainsKey($key)) { Exit-With 0 ("{0} = {1}" -f $key, $cfg[$key]) }
+        Exit-With 1 "no such key '$key'"
+    }
+    if ($key -eq 'mode' -and @('tabs', 'windows', 'background') -notcontains $value) {
+        Exit-With 1 "mode must be tabs | windows | background"
+    }
+    Set-ConfigKey $key $value
+    Exit-With 0 ("{0} = {1}" -f $key, $value)
 }
 
 function Invoke-Doctor {
@@ -406,6 +529,7 @@ switch ($Command.ToLower()) {
     'doctor'    { Invoke-Doctor }
     'install'   { Invoke-Install $opts }
     'uninstall' { Invoke-Uninstall }
+    'config'    { Invoke-Config $opts }
     'prune'     { Invoke-Prune; Exit-With 0 'pruned' }
     'version'   { Exit-With 0 "encore $script:Version" }
     default {
@@ -416,7 +540,9 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore restore                   reopen every closed one, a tab each
   encore restore --only 1,3        reopen selected ones
   encore restore --dry-run         print the commands only
+  encore restore --mode background reopen with no terminal (claude attach <id>)
   encore save                      snapshot what is open right now
+  encore config [key value]        show or set config (e.g. config mode windows)
   encore doctor                    check the install
   encore install [--no-task]       put encore on PATH (+ 15-min autosave task)
   encore uninstall                 undo install
@@ -424,6 +550,8 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
 filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
          --prompt "text" (sent on resume; default "Continue from where you left off.")
          --no-prompt (resume without a turn)
+         --mode tabs|windows|background  (persist default: encore config mode ...)
+         --tabs / --windows / --background  one-off mode override
          --ids (show session ids in list)
          --yolo (add --dangerously-skip-permissions)  --wt (force Windows Terminal)
          --window (new window, affects --wt only)
