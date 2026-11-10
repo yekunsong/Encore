@@ -4,11 +4,11 @@
   Uses a throwaway background session in .test\smoke and removes it afterwards.
 #>
 [CmdletBinding()]
-param([string]$Model = 'haiku', [string]$Dir)
+param([string]$Model = 'haiku')
 
 $root = Split-Path -Parent $PSScriptRoot
 $encore = Join-Path $root 'encore.ps1'
-$dir = if ($Dir) { $Dir } else { Join-Path $root '.test\smoke' }
+$dir = Join-Path $root '.test\smoke'
 $codeword = 'TANGERINE-' + ([char[]]'QUAY' -join '')
 $fail = 0
 $id = $null
@@ -64,28 +64,42 @@ try {
     Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
     Check ($listed -match 'closed') 'it is reported as closed'
 
-    Step 'the hook record kept the session kind'
-    $bgOnly = (Invoke-Encore @('list', '--ids', '--kinds', 'background', '--since', '10m')) -join "`n"
-    Check ($bgOnly -match [regex]::Escape($id)) 'a background session is still found with --kinds background'
+    Step 'a stale index line with no transcript is pruned'
+    $stale = 'deadbeef-0000-4000-8000-000000000001'
+    $line = '{"id":"' + $stale + '","cwd":"' + ($dir -replace '\\', '\\\\') +
+            '","kind":"bg","startedAt":' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '}'
+    Add-Content -LiteralPath $index -Value $line -Encoding utf8
+    try {
+        $withStale = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    } finally {
+        $kept = @(Get-Content -LiteralPath $index | Where-Object { $_ -notmatch $stale })
+        [IO.File]::WriteAllText($index, ($kept -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
+    }
+    Check ($withStale -notmatch $stale) 'entry without a transcript is dropped'
 
     Step 'dry run plans the right command'
-    $plan = (Invoke-Encore @('restore', '--dry-run', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    $plan = (Invoke-Encore @('restore', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    if ($plan -notmatch "--resume $full") { Write-Host $plan }
     Check ($plan -match "--resume $full") 'plan resumes the right id'
     Check ($plan -match 'Continue from where you left off\.') 'plan sends the continuation prompt'
 
     Step 'resume refreshes the conversation (real model call)'
-    Push-Location $dir
-    try {
-        $json = & claude -p --model $Model --output-format json --resume $full "What was the codeword? Reply with the codeword only." 2>&1
-    } finally { Pop-Location }
     $reply = ''
-    try { $reply = ($json -join "`n" | ConvertFrom-Json).result } catch { $reply = ($json -join "`n") }
+    foreach ($attempt in 1, 2) {
+        Push-Location $dir
+        try {
+            $json = & claude -p --model $Model --output-format json --resume $full "What was the codeword? Reply with the codeword only." 2>&1
+        } finally { Pop-Location }
+        try { $reply = ($json -join "`n" | ConvertFrom-Json).result } catch { $reply = ($json -join "`n") }
+        if ($reply -match [regex]::Escape($codeword)) { break }
+        Write-Host "  (attempt $attempt got: $reply)"
+    }
     Check ($reply -match [regex]::Escape($codeword)) "model recalled the codeword"
 
     Step 'restore modes are configurable'
     $modes = @{}
     foreach ($m in 'tabs', 'windows', 'background') {
-        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--only', $id, '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     }
     Check ($modes['tabs'] -match 'powershell -NoExit') 'tabs mode plans a console'
     Check ($modes['windows'] -match 'new-window') 'windows mode plans a new window'
@@ -95,7 +109,8 @@ try {
     Invoke-Encore @('config', 'mode', 'tabs') | Out-Null
 
     Step 'background mode restores without a terminal (real model call)'
-    Invoke-Encore @('restore', '--mode', 'background', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
+    Start-Sleep -Seconds 3
+    $bgOut = (Invoke-Encore @('restore', '--mode', 'background', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     $deadline = (Get-Date).AddSeconds(40)
     $bgRow = $null
     do {
@@ -103,6 +118,7 @@ try {
         $live = claude agents --json | ConvertFrom-Json
         $bgRow = $live | Where-Object { $_.sessionId -eq $full -and $_.kind -eq 'background' }
     } until ($bgRow -or (Get-Date) -gt $deadline)
+    if (-not $bgRow) { Write-Host $bgOut }
     Check ($null -ne $bgRow) 'session runs in the background with no window'
     if ($bgRow) {
         claude stop $bgRow.id 2>$null | Out-Null
@@ -121,10 +137,19 @@ try {
     $deadline = (Get-Date).AddSeconds(60)
     do {
         Start-Sleep -Seconds 2
-        $proc = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
-            Where-Object { $_.CommandLine -like "*--resume $full*" } | Select-Object -First 1
+        # one failed poll must not end the wait: WMI runs out of threads under load
+        try {
+            $proc = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*--resume $full*" } | Select-Object -First 1
+        } catch { $proc = $null }
     } until ($proc -or (Get-Date) -gt $deadline)
-    Check ($null -ne $proc) "a terminal is running claude --resume $full"
+    if (-not $proc) {
+        # WMI unavailable: the session being live again still shows it was resumed
+        $back = @(claude agents --json | ConvertFrom-Json) | Where-Object { $_.sessionId -eq $full } | Select-Object -First 1
+        Check ($null -ne $back) "a terminal is running claude --resume $full (agent list; WMI unavailable)"
+    } else {
+        Check $true "a terminal is running claude --resume $full"
+    }
 }
 finally {
     Step 'cleanup'

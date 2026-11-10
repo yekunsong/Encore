@@ -142,20 +142,13 @@ function Format-Age {
 
 # --------------------------------------------------------- session sources ---
 
-function ConvertTo-Kind {
-    param([string]$Kind)
-    if (-not $Kind) { return 'interactive' }
-    if ($Kind -eq 'bg') { return 'background' }
-    return $Kind
-}
-
 function New-Entry {
     param($Raw)
     [pscustomobject]@{
         id        = if ($Raw.sessionId) { [string]$Raw.sessionId } else { [string]$Raw.id }
         cwd       = [string]$Raw.cwd
         name      = [string]$Raw.name
-        kind      = ConvertTo-Kind ([string]$Raw.kind)
+        kind      = if (-not $Raw.kind) { 'interactive' } elseif ($Raw.kind -eq 'bg') { 'background' } else { [string]$Raw.kind }
         startedAt = ConvertTo-EpochMs $Raw.startedAt
         updatedAt = ConvertTo-EpochMs $(if ($Raw.updatedAt) { $Raw.updatedAt } else { $Raw.startedAt })
         pid       = if ($Raw.pid) { [int]$Raw.pid } else { 0 }
@@ -177,6 +170,18 @@ function Get-LiveSessions {
     }
 }
 
+function Add-IndexLine {
+    param([string]$Id, [string]$Cwd, [long]$StartedAt)
+    if (-not $Id -or -not $Cwd) { return }
+    New-Item -ItemType Directory -Force -Path $script:AppDir | Out-Null
+    $line = [pscustomobject]@{
+        id = $Id; cwd = $Cwd
+        startedAt = $(if ($StartedAt) { $StartedAt } else { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
+        source = 'seed'
+    } | ConvertTo-Json -Compress
+    [IO.File]::AppendAllText((Join-Path $script:AppDir 'index.jsonl'), $line + "`n", (New-Object Text.UTF8Encoding($false)))
+}
+
 function Read-SessionRecords {
     <# Every restorable record: hook index plus live on-disk records. #>
     $map = @{}
@@ -186,7 +191,7 @@ function Read-SessionRecords {
             try { $r = $ln | ConvertFrom-Json } catch { continue }
             if (-not $r.id) { continue }
             $map[[string]$r.id] = [pscustomobject]@{
-                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = (ConvertTo-Kind ([string]$r.kind))
+                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = 'interactive'
                 startedAt = ConvertTo-EpochMs $r.startedAt; updatedAt = ConvertTo-EpochMs $r.startedAt; pid = 0
             }
         }
@@ -245,11 +250,9 @@ function Select-Candidates {
     $root = Join-Path (Get-ClaudeConfigDir) 'projects'
     if (Test-Path -LiteralPath $root) {
         $known = @{}
-        try {
-            foreach ($f in [IO.Directory]::EnumerateFiles($root, '*.jsonl', 'AllDirectories')) {
-                $known[[IO.Path]::GetFileNameWithoutExtension($f)] = $true
-            }
-        } catch { }
+        foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -Filter '*.jsonl' -File -ErrorAction SilentlyContinue) {
+            $known[$f.BaseName] = $true
+        }
         $items = @($items | Where-Object { $known.ContainsKey($_.id) })
     }
 
@@ -447,6 +450,13 @@ function Invoke-Install {
         Write-Info "registered SessionStart hook in $settingsFile"
     }
 
+    $seeded = 0
+    foreach ($s in Get-LiveSessions) {
+        if ($s.kind -ne 'interactive' -or -not $s.id) { continue }
+        Add-IndexLine $s.id $s.cwd $s.startedAt
+        $seeded++
+    }
+    if ($seeded) { Write-Info "seeded $seeded already-open session(s) into the index" }
     Write-Info 'installed. Try: encore list'
 }
 
@@ -519,7 +529,7 @@ filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
          --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode tabs|windows|background  (persist default: encore config mode ...)
          --tabs / --windows / --background  one-off mode override
-         --ids (show session ids in list)  --kinds interactive,background (default interactive)
+         --ids (show session ids in list)  --kinds (default interactive)
          --yolo (add --dangerously-skip-permissions)
 "@ | Write-Host
     }
