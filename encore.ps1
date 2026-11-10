@@ -480,10 +480,10 @@ function Invoke-Install {
     if ($Opts['task'] -eq $true) {
         $ps1 = Join-Path $bin 'encore.ps1'
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-            -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" save --quiet' -f $ps1)
+            -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" save --quiet' -f $ps1)
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
             -RepetitionInterval (New-TimeSpan -Minutes 15)
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
         Register-ScheduledTask -TaskName 'Encore-Autosave' -Action $action -Trigger $trigger `
             -Settings $settings -Description 'Snapshot open Claude Code sessions' -Force | Out-Null
         Write-Info 'registered autosave task (backstop, every 15 minutes)'
