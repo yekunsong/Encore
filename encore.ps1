@@ -466,7 +466,7 @@ function Invoke-Install {
 
     $settingsFile = Join-Path (Get-ClaudeConfigDir) 'settings.json'
     $hookCmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $bin 'encore-hook.ps1') + '"'
-    $cfg = if (Test-Path -LiteralPath $settingsFile) { Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+    $cfg = if (Test-Path -LiteralPath $settingsFile) { Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { [pscustomobject]@{} }
     if (-not $cfg.PSObject.Properties['hooks']) { $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
     if (-not $cfg.hooks.PSObject.Properties['SessionStart']) { $cfg.hooks | Add-Member -NotePropertyName SessionStart -NotePropertyValue @() }
     $entry = [pscustomobject]@{ matcher = 'startup|resume|fork'; hooks = @([pscustomobject]@{ type = 'command'; command = $hookCmd; timeout = 10 }) }
@@ -499,7 +499,7 @@ function Invoke-Uninstall {
     $settingsFile = Join-Path (Get-ClaudeConfigDir) 'settings.json'
     if (Test-Path -LiteralPath $settingsFile) {
         try {
-            $cfg = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+            $cfg = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
             $ss = @($cfg.hooks.SessionStart) | Where-Object {
                 -not (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' })
             }
