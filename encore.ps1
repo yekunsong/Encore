@@ -178,11 +178,12 @@ function Get-LiveSessions {
 }
 
 function Add-IndexLine {
-    param([string]$Id, [string]$Cwd, [long]$StartedAt)
+    param([string]$Id, [string]$Cwd, [long]$StartedAt, [string]$Kind)
     if (-not $Id -or -not $Cwd) { return }
     New-Item -ItemType Directory -Force -Path $script:AppDir | Out-Null
     $line = [pscustomobject]@{
         id = $Id; cwd = $Cwd
+        kind = (ConvertTo-Kind $Kind)
         startedAt = $(if ($StartedAt) { $StartedAt } else { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
         source = 'seed'
     } | ConvertTo-Json -Compress
@@ -245,8 +246,8 @@ function Select-Candidates {
     })
 
     if ($Opts['project']) {
-        $root = ([string]$Opts['project']).TrimEnd('\', '/')
-        $items = @($items | Where-Object { $_.cwd.TrimEnd('\', '/') -ieq $root -or $_.cwd -ilike "$root\*" })
+        $projRoot = ([string]$Opts['project']).TrimEnd('\', '/')
+        $items = @($items | Where-Object { $_.cwd.TrimEnd('\', '/') -ieq $projRoot -or $_.cwd -ilike "$projRoot\*" })
     }
     if ($Opts['include-open'] -ne $true) {
         $items = @($items | Where-Object { -not (Test-SessionAlive $_ $alive) })
@@ -254,20 +255,14 @@ function Select-Candidates {
     $items = @($items | Sort-Object updatedAt -Descending)
 
     # drop ids whose transcript is gone (removed sessions, dead index lines)
-    $root = Join-Path (Get-ClaudeConfigDir) 'projects'
-    if (Test-Path -LiteralPath $root) {
+    $projects = Join-Path (Get-ClaudeConfigDir) 'projects'
+    if (Test-Path -LiteralPath $projects) {
         $known = @{}
-<<<<<<< HEAD
-        foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -Filter '*.jsonl' -File -ErrorAction SilentlyContinue) {
-            $known[$f.BaseName] = $true
-        }
-=======
         try {
-            foreach ($f in [IO.Directory]::EnumerateFiles($root, '*.jsonl', 'AllDirectories')) {
+            foreach ($f in [IO.Directory]::EnumerateFiles($projects, '*.jsonl', 'AllDirectories')) {
                 $known[[IO.Path]::GetFileNameWithoutExtension($f)] = $true
             }
         } catch { }
->>>>>>> worktree-kinds-docs
         $items = @($items | Where-Object { $known.ContainsKey($_.id) })
     }
 
@@ -467,8 +462,8 @@ function Invoke-Install {
 
     $seeded = 0
     foreach ($s in Get-LiveSessions) {
-        if ($s.kind -ne 'interactive' -or -not $s.id) { continue }
-        Add-IndexLine $s.id $s.cwd $s.startedAt
+        if (-not $s.id -or -not $s.cwd) { continue }
+        Add-IndexLine $s.id $s.cwd $s.startedAt $s.kind
         $seeded++
     }
     if ($seeded) { Write-Info "seeded $seeded already-open session(s) into the index" }

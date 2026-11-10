@@ -64,11 +64,11 @@ try {
     Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
     Check ($listed -match 'closed') 'it is reported as closed'
 
-<<<<<<< HEAD
     Step 'a stale index line with no transcript is pruned'
-    $stale = 'deadbeef-0000-4000-8000-000000000001'
+    $staleShort = 'deadbeef'
+    $stale = "$staleShort-0000-4000-8000-000000000001"
     $line = '{"id":"' + $stale + '","cwd":"' + ($dir -replace '\\', '\\\\') +
-            '","kind":"bg","startedAt":' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '}'
+            '","startedAt":' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '}'
     Add-Content -LiteralPath $index -Value $line -Encoding utf8
     try {
         $withStale = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
@@ -76,12 +76,12 @@ try {
         $kept = @(Get-Content -LiteralPath $index | Where-Object { $_ -notmatch $stale })
         [IO.File]::WriteAllText($index, ($kept -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
     }
-    Check ($withStale -notmatch $stale) 'entry without a transcript is dropped'
-=======
+    Check ($withStale -match $id.Substring(0, 8)) 'the real session is still listed'
+    Check ($withStale -notmatch $staleShort) 'entry without a transcript is dropped'
+
     Step 'the hook record kept the session kind'
     $bgOnly = (Invoke-Encore @('list', '--ids', '--kinds', 'background', '--since', '10m')) -join "`n"
     Check ($bgOnly -match [regex]::Escape($id)) 'a background session is still found with --kinds background'
->>>>>>> worktree-kinds-docs
 
     Step 'dry run plans the right command'
     $plan = (Invoke-Encore @('restore', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
