@@ -78,7 +78,8 @@ marker. Change it with `--prompt "text"`, drop it with `--prompt ""`.
 ## How it works
 
 Claude deletes the session record of a dead process at next startup, so Encore
-keeps its own copy: a `SessionStart` hook appends `session id + folder + time` to
+keeps its own copy: a `SessionStart` hook appends `session id + folder + kind +
+time` to
 `%LOCALAPPDATA%\Encore\index.jsonl` the instant a session starts — no polling, no
 timer, no window in which a session can be lost. Live `~/.claude/sessions\*.json`
 records are read too, so sessions started before the hook existed still restore.
