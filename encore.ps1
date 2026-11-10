@@ -142,13 +142,20 @@ function Format-Age {
 
 # --------------------------------------------------------- session sources ---
 
+function ConvertTo-Kind {
+    param([string]$Kind)
+    if (-not $Kind) { return 'interactive' }
+    if ($Kind -eq 'bg') { return 'background' }
+    return $Kind
+}
+
 function New-Entry {
     param($Raw)
     [pscustomobject]@{
         id        = if ($Raw.sessionId) { [string]$Raw.sessionId } else { [string]$Raw.id }
         cwd       = [string]$Raw.cwd
         name      = [string]$Raw.name
-        kind      = if (-not $Raw.kind) { 'interactive' } elseif ($Raw.kind -eq 'bg') { 'background' } else { [string]$Raw.kind }
+        kind      = ConvertTo-Kind ([string]$Raw.kind)
         startedAt = ConvertTo-EpochMs $Raw.startedAt
         updatedAt = ConvertTo-EpochMs $(if ($Raw.updatedAt) { $Raw.updatedAt } else { $Raw.startedAt })
         pid       = if ($Raw.pid) { [int]$Raw.pid } else { 0 }
@@ -191,7 +198,7 @@ function Read-SessionRecords {
             try { $r = $ln | ConvertFrom-Json } catch { continue }
             if (-not $r.id) { continue }
             $map[[string]$r.id] = [pscustomobject]@{
-                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = 'interactive'
+                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = (ConvertTo-Kind ([string]$r.kind))
                 startedAt = ConvertTo-EpochMs $r.startedAt; updatedAt = ConvertTo-EpochMs $r.startedAt; pid = 0
             }
         }
@@ -250,9 +257,17 @@ function Select-Candidates {
     $root = Join-Path (Get-ClaudeConfigDir) 'projects'
     if (Test-Path -LiteralPath $root) {
         $known = @{}
+<<<<<<< HEAD
         foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -Filter '*.jsonl' -File -ErrorAction SilentlyContinue) {
             $known[$f.BaseName] = $true
         }
+=======
+        try {
+            foreach ($f in [IO.Directory]::EnumerateFiles($root, '*.jsonl', 'AllDirectories')) {
+                $known[[IO.Path]::GetFileNameWithoutExtension($f)] = $true
+            }
+        } catch { }
+>>>>>>> worktree-kinds-docs
         $items = @($items | Where-Object { $known.ContainsKey($_.id) })
     }
 
@@ -529,7 +544,7 @@ filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
          --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode tabs|windows|background  (persist default: encore config mode ...)
          --tabs / --windows / --background  one-off mode override
-         --ids (show session ids in list)  --kinds (default interactive)
+         --ids (show session ids in list)  --kinds interactive,background (default interactive)
          --yolo (add --dangerously-skip-permissions)
 "@ | Write-Host
     }
