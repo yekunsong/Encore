@@ -74,7 +74,7 @@ Pick one:
 **Git (recommended)**
 
 ```powershell
-git clone https://github.com/<you>/Encore.git C:\Tools\Encore
+git clone https://github.com/yekunsong/Encore.git C:\Tools\Encore
 cd C:\Tools\Encore
 .\encore.ps1 install
 ```
