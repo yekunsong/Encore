@@ -154,9 +154,11 @@ try {
 finally {
     Step 'cleanup'
     if ($id) {
-        Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
-            Where-Object { $_.CommandLine -like "*$id*" } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        try {
+            Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -like "*$id*" } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } catch { Write-Host '  (WMI unavailable; left stray processes)' }
         Push-Location $dir
         try { claude rm $id 2>$null | Out-Null } finally { Pop-Location }
         Write-Host "  removed test session $id"
