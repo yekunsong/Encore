@@ -500,7 +500,7 @@ filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
          --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode tabs|windows|background  (persist default: encore config mode ...)
          --tabs / --windows / --background  one-off mode override
-         --ids (show session ids in list)  --kinds (default interactive)
+         --ids (show session ids in list)  --kinds interactive,background (default interactive)
          --yolo (add --dangerously-skip-permissions)
 "@ | Write-Host
     }

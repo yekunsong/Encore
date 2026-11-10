@@ -52,7 +52,7 @@ and registers the `SessionStart` hook. Open a new terminal afterwards.
 | `encore uninstall` | Remove PATH entry and hook |
 
 Filters: `--since 30m|2d|1w`, `--project <dir>`, `--limit N`, `--include-open`,
-`--ids`, `--kinds`.
+`--ids`, `--kinds interactive,background` (comma-separated; default `interactive`).
 
 ### Modes
 
@@ -89,7 +89,8 @@ written.
 
 ## Limitations
 
-- Interactive CLI sessions only (`--kinds bg` to include background ones).
+- Interactive CLI sessions only by default (`--kinds background`, or
+  `--kinds interactive,background` for both).
 - Tab order and window geometry are not preserved.
 - Flags not stored with a session (`--add-dir`, `--mcp-config`, `--settings`,
   `--plugin-dir`, `--fallback-model`) are not re-applied.
