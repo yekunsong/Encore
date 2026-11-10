@@ -35,9 +35,9 @@ cd C:\Tools\Encore
 .\encore.ps1 install
 ```
 
-Copies the script to `%LOCALAPPDATA%\Encore\bin`, adds it to your user `PATH`,
-and registers a 15-minute autosave task (`--no-task` to skip). Open a new
-terminal afterwards.
+Copies the scripts to `%LOCALAPPDATA%\Encore\bin`, adds it to your user `PATH`,
+and registers the `SessionStart` hook. Open a new terminal afterwards.
+
 
 ## Use
 
@@ -47,10 +47,9 @@ terminal afterwards.
 | `encore restore` | Reopen every closed session |
 | `encore restore --only 1,3` | Reopen selected rows |
 | `encore restore --dry-run` | Print the commands, launch nothing |
-| `encore save` | Snapshot what is open right now |
 | `encore config mode windows` | Persist a default restore mode |
 | `encore doctor` | Check the installation |
-| `encore uninstall` | Remove PATH entry and task |
+| `encore uninstall` | Remove PATH entry and hook |
 
 Filters: `--since 30m|2d|1w`, `--project <dir>`, `--limit N`, `--include-open`,
 `--ids`, `--kinds`.
@@ -80,10 +79,9 @@ marker. Change it with `--prompt "text"`, drop it with `--prompt ""`.
 
 Claude deletes the session record of a dead process at next startup, so Encore
 keeps its own copy: a `SessionStart` hook appends `session id + folder + time` to
-`%LOCALAPPDATA%\Encore\index.jsonl` the instant a session starts — no polling and
-no window in which a session can be lost. Live `~/.claude/sessions\*.json`
-records and the newest snapshot are read too, so sessions started before the hook
-was installed still restore.
+`%LOCALAPPDATA%\Encore\index.jsonl` the instant a session starts — no polling, no
+timer, no window in which a session can be lost. Live `~/.claude/sessions\*.json`
+records are read too, so sessions started before the hook existed still restore.
 
 Each candidate resumes with `claude --resume <id>` in its own folder; liveness is
 checked per session id and PID. Nothing leaves the machine and no transcript is
@@ -95,16 +93,15 @@ written.
 - Tab order and window geometry are not preserved.
 - Flags not stored with a session (`--add-dir`, `--mcp-config`, `--settings`,
   `--plugin-dir`, `--fallback-model`) are not re-applied.
-- `claude stop` deletes the session record, so a stopped session only restores
-  from the index or a snapshot.
+- `claude stop` deletes the live session record; the hook index still has it.
 - Sessions started with hooks disabled (`--bare`, `--safe-mode`, `/config`
-  toggles) are recorded only by the fallback sources.
+  toggles) are recorded only by the live record, and lost after a reboot.
 
 ## Testing
 
 `tests\smoke.ps1` exercises the whole loop against a throwaway session with a
-cheap model — real model call, real snapshot, real resume, real cleanup. Run it
-after changes:
+cheap model — real model call, real hook record, real resume, real cleanup. It
+needs the hook installed. Run it after changes:
 
 ```powershell
 .\tests\smoke.ps1

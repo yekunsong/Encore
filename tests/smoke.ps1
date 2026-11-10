@@ -50,10 +50,12 @@ try {
 
     $full = $row.sessionId
 
-    Step 'snapshot it'
-    Invoke-Encore @('save', '--kinds', 'background', '--quiet')
-    $snaps = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Encore\snapshots') -Filter '*.json' -ErrorAction SilentlyContinue)
-    Check ($snaps.Count -gt 0) "snapshot written ($($snaps.Count) total)"
+    Step 'the SessionStart hook indexed it'
+    $index = Join-Path $env:LOCALAPPDATA 'Encore\index.jsonl'
+    $deadline = (Get-Date).AddSeconds(20)
+    do { Start-Sleep -Milliseconds 500 } until (
+        ((Test-Path $index) -and (Select-String -LiteralPath $index -SimpleMatch $full -Quiet)) -or (Get-Date) -gt $deadline)
+    Check ((Test-Path $index) -and (Select-String -LiteralPath $index -SimpleMatch $full -Quiet))         'session appears in the hook index (run encore install first)'
 
     Step 'stop the session and check it shows up as closed'
     claude stop $id | Out-Null

@@ -13,8 +13,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:Version = '0.1.0'
 $script:AppDir = Join-Path $env:LOCALAPPDATA 'Encore'
-$script:SnapDir = Join-Path $script:AppDir 'snapshots'
-$script:KeepSnapshots = 50
 $script:MissingCwd = @()
 
 # ---------------------------------------------------------------- helpers ---
@@ -172,13 +170,8 @@ function Get-LiveSessions {
     }
 }
 
-function Get-SnapshotFiles {
-    if (-not (Test-Path -LiteralPath $script:SnapDir)) { return @() }
-    Get-ChildItem -LiteralPath $script:SnapDir -Filter '*.json' -File | Sort-Object LastWriteTime -Descending
-}
-
 function Read-SessionRecords {
-    <# Every restorable record: hook index, newest snapshot, on-disk ones. #>
+    <# Every restorable record: hook index plus live on-disk records. #>
     $map = @{}
     $idx = Join-Path $script:AppDir 'index.jsonl'
     if (Test-Path -LiteralPath $idx) {
@@ -190,12 +183,6 @@ function Read-SessionRecords {
                 startedAt = ConvertTo-EpochMs $r.startedAt; updatedAt = ConvertTo-EpochMs $r.startedAt; pid = 0
             }
         }
-    }
-    $snap = Get-SnapshotFiles | Select-Object -First 1
-    if ($snap) {
-        try { foreach ($e in @((Get-Content -LiteralPath $snap.FullName -Raw | ConvertFrom-Json).entries)) {
-            if ($e.id) { $map[[string]$e.id] = (New-Entry $e) }
-        } } catch { }
     }
     $dir = Join-Path (Get-ClaudeConfigDir) 'sessions'
     if (Test-Path -LiteralPath $dir) {
@@ -226,43 +213,6 @@ function Test-SessionAlive {
 }
 
 # --------------------------------------------------------------- commands ---
-
-function Invoke-Prune {
-    $files = @(Get-SnapshotFiles)
-    if ($files.Count -le $script:KeepSnapshots) { return }
-    $files | Select-Object -Skip $script:KeepSnapshots | ForEach-Object {
-        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-Save {
-    param($Opts)
-    $kinds = Resolve-Kinds ([string]$Opts['kinds'])
-
-    $live = @(Get-LiveSessions | Where-Object { $kinds -contains $_.kind })
-    if ($live.Count -eq 0) {
-        $cut = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 600000
-        $live = @(Read-SessionRecords | Where-Object { $kinds -contains $_.kind -and $_.updatedAt -gt $cut })
-    }
-    if ($live.Count -eq 0) { Exit-With 0 'nothing to snapshot' }
-
-    $entries = $live | Sort-Object updatedAt -Descending
-
-    New-Item -ItemType Directory -Force -Path $script:SnapDir | Out-Null
-    $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-    $path = Join-Path $script:SnapDir "$stamp.json"
-    [pscustomobject]@{
-        version   = 1
-        createdAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        machine   = $env:COMPUTERNAME
-        entries   = @($entries)
-    } | ConvertTo-Json -Depth 5 | Out-String | ForEach-Object {
-        [IO.File]::WriteAllText($path, $_, (New-Object Text.UTF8Encoding($false)))
-    }
-
-    Invoke-Prune
-    if ($Opts['quiet'] -ne $true) { Write-Info ("saved {0} session(s) to {1}" -f @($entries).Count, $path) }
-}
 
 function Select-Candidates {
     param($Opts)
@@ -441,10 +391,11 @@ function Invoke-Doctor {
         $found = Get-Command $c -ErrorAction SilentlyContinue
         if ($found) { Write-Info "[ok]   $c" } else { Write-Info "[     ] $c"; if ($c -eq 'claude') { $bad = $true } }
     }
-    Write-Info ("[info] {0} live session(s), {1} snapshot(s), mode {2}" -f
-        @(Get-LiveSessions).Count, @(Get-SnapshotFiles).Count, (Resolve-Mode @{}))
-    $task = Get-ScheduledTask -TaskName 'Encore-Autosave' -ErrorAction SilentlyContinue
-    if ($task) { Write-Info '[ok]   autosave task' } else { Write-Info '[ ]    autosave task (run: encore install)' }
+    Write-Info ("[info] {0} live session(s), mode {1}" -f @(Get-LiveSessions).Count, (Resolve-Mode @{}))
+    $idx = Join-Path $script:AppDir 'index.jsonl'
+    $lines = if (Test-Path -LiteralPath $idx) { @(Get-Content -LiteralPath $idx).Count } else { 0 }
+    if ($lines) { Write-Info "[ok]   hook index has $lines record(s)" }
+    else { Write-Info '[ ]    hook index empty — run: encore install' }
     if ($bad) { exit 1 }
 }
 
@@ -477,25 +428,10 @@ function Invoke-Install {
         Write-Info "registered SessionStart hook in $settingsFile"
     }
 
-    if ($Opts['task'] -eq $true) {
-        $ps1 = Join-Path $bin 'encore.ps1'
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-            -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" save --quiet' -f $ps1)
-        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-            -RepetitionInterval (New-TimeSpan -Minutes 15)
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
-        Register-ScheduledTask -TaskName 'Encore-Autosave' -Action $action -Trigger $trigger `
-            -Settings $settings -Description 'Snapshot open Claude Code sessions' -Force | Out-Null
-        Write-Info 'registered autosave task (backstop, every 15 minutes)'
-    } else {
-        Unregister-ScheduledTask -TaskName 'Encore-Autosave' -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Info 'hook records sessions as they start (no polling task)'
-    }
     Write-Info 'installed. Try: encore list'
 }
 
 function Invoke-Uninstall {
-    Unregister-ScheduledTask -TaskName 'Encore-Autosave' -Confirm:$false -ErrorAction SilentlyContinue
     $settingsFile = Join-Path (Get-ClaudeConfigDir) 'settings.json'
     if (Test-Path -LiteralPath $settingsFile) {
         try {
@@ -514,7 +450,7 @@ function Invoke-Uninstall {
         [Environment]::SetEnvironmentVariable('Path', $new, 'User')
     }
     Remove-Item -LiteralPath $bin -Recurse -Force -ErrorAction SilentlyContinue
-    Exit-With 0 'uninstalled (snapshots kept in %LOCALAPPDATA%\Encore)'
+    Exit-With 0 'uninstalled (hook index kept in %LOCALAPPDATA%\Encore)'
 }
 
 # ------------------------------------------------------------------ main ----
@@ -522,7 +458,6 @@ function Invoke-Uninstall {
 $opts = Get-Opt $Rest
 
 switch ($Command.ToLower()) {
-    'save'      { Invoke-Save $opts }
     'list'      { Invoke-List $opts }
     'restore'   { Invoke-Restore $opts }
     'doctor'    { Invoke-Doctor }
@@ -556,10 +491,9 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore restore --only 1,3        reopen selected ones
   encore restore --dry-run         print the commands only
   encore restore --mode background reopen with no terminal (claude attach <id>)
-  encore save                      snapshot what is open right now
   encore config [key value]        show or set config (e.g. config mode windows)
   encore doctor                    check the install
-  encore install [--task]          PATH + SessionStart hook (--task adds a 15-min backstop)
+  encore install                   put encore on PATH and register the hook
   encore uninstall                 undo install
 
 filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
