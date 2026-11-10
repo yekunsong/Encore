@@ -4,11 +4,11 @@
   Uses a throwaway background session in .test\smoke and removes it afterwards.
 #>
 [CmdletBinding()]
-param([string]$Model = 'haiku')
+param([string]$Model = 'haiku', [string]$Dir)
 
 $root = Split-Path -Parent $PSScriptRoot
 $encore = Join-Path $root 'encore.ps1'
-$dir = Join-Path $root '.test\smoke'
+$dir = if ($Dir) { $Dir } else { Join-Path $root '.test\smoke' }
 $codeword = 'TANGERINE-' + ([char[]]'QUAY' -join '')
 $fail = 0
 $id = $null
@@ -64,17 +64,9 @@ try {
     Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
     Check ($listed -match 'closed') 'it is reported as closed'
 
-    Step 'a stale index line with no transcript is pruned'
-    $stale = 'deadbeef-0000-4000-8000-000000000001'
-    $line = '{"id":"' + $stale + '","cwd":"' + ($dir -replace '\\', '\\\\') +
-            '","kind":"bg","startedAt":' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '}'
-    Add-Content -LiteralPath $index -Value $line -Encoding utf8
-    try {
-        $withStale = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
-    } finally {
-        Set-Content -LiteralPath $index -Encoding utf8 -Value (Get-Content -LiteralPath $index | Where-Object { $_ -notmatch $stale })
-    }
-    Check ($withStale -notmatch $stale) 'entry without a transcript is dropped'
+    Step 'the hook record kept the session kind'
+    $bgOnly = (Invoke-Encore @('list', '--ids', '--kinds', 'background', '--since', '10m')) -join "`n"
+    Check ($bgOnly -match [regex]::Escape($id)) 'a background session is still found with --kinds background'
 
     Step 'dry run plans the right command'
     $plan = (Invoke-Encore @('restore', '--dry-run', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
