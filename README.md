@@ -2,41 +2,30 @@
 
 Reopen the Claude Code sessions a reboot cut off — in one command.
 
-`encore restore` puts every closed session back the way you left it: same folder,
-same conversation, one terminal tab each. No daemon, no service, no dependencies
-beyond PowerShell 5.1 and the `claude` CLI you already have.
-
 ```
-$ encore list
-  1  closed  12m  D:\work\api      api-refactor
-  2  closed   3h  D:\work\web      web-3
-  3    open  41m  D:\work\infra    infra
-
 $ encore restore
-2 session(s) to reopen:
+2 session(s) to reopen [tabs mode]:
   1  12m  D:\work\api  api-refactor
   2   3h  D:\work\web  web-3
 reopened 2 session(s)
 ```
 
+Each session comes back in its own folder with its conversation intact. Sessions
+that are still running are skipped, so nothing gets forked out from under you.
+
 ## Why
 
-Claude Code resumes one session at a time: `--resume <id>`, or the `/resume`
-picker. It has no "reopen everything" command, and nothing restores the windows
-you had open. Background sessions don't survive a reboot either, and
+Claude Code resumes one session at a time (`--resume <id>`, or the `/resume`
+picker), has no "reopen everything" verb, and restores nothing about the windows
+you had open. Background sessions don't survive a reboot, and
 `claude respawn --all` only restarts sessions that are still running — after a
-reboot, none are.
-
-If you keep a dozen sessions across several projects, every restart is a manual
-round of `cd` and `--resume`. Encore is the missing batch verb.
+reboot, none are. If you keep a dozen sessions open, every restart is a manual
+round of `cd` and `--resume`.
 
 ## Requirements
 
-- Windows 10/11
-- Windows PowerShell 5.1 (built in) — PowerShell 7 also works
-- Claude Code with `claude` on `PATH`
-- Each folder you restore from must be trusted once (Claude Code's normal
-  workspace-trust prompt). Encore cannot accept that dialog for you.
+Windows 10/11, Windows PowerShell 5.1 (built in), `claude` on `PATH`. Each folder
+must be trusted once — Encore can't accept that dialog for you.
 
 ## Install
 
@@ -46,127 +35,73 @@ cd C:\Tools\Encore
 .\encore.ps1 install
 ```
 
-`install` copies the script to `%LOCALAPPDATA%\Encore\bin`, puts that folder on
-your user `PATH`, and registers an autosave task that snapshots your open
-sessions every 15 minutes. Open a new terminal afterwards.
-
-`install --no-task` skips the scheduled task.
+Copies the script to `%LOCALAPPDATA%\Encore\bin`, adds it to your user `PATH`,
+and registers a 15-minute autosave task (`--no-task` to skip). Open a new
+terminal afterwards.
 
 ## Use
 
 | Command | What it does |
 | --- | --- |
-| `encore list` | Show restorable sessions (last 7 days by default) |
-| `encore restore` | Reopen every closed session, one tab each |
-| `encore restore --only 1,3` | Reopen selected rows from the list |
+| `encore list` | Show restorable sessions (last 7 days) |
+| `encore restore` | Reopen every closed session |
+| `encore restore --only 1,3` | Reopen selected rows |
 | `encore restore --dry-run` | Print the commands, launch nothing |
-| `encore restore --project D:\work\api` | Only that tree |
-| `encore restore --since 2d --limit 10` | Narrow the window |
-| `encore restore --mode background` | Resume with no terminal, then `claude attach <id>` |
-| `encore config mode windows` | Persist how restore opens terminals |
 | `encore save` | Snapshot what is open right now |
 | `encore config mode windows` | Persist a default restore mode |
 | `encore doctor` | Check the installation |
 | `encore uninstall` | Remove PATH entry and task |
 
-### Restore modes
+Filters: `--since 30m|2d|1w`, `--project <dir>`, `--limit N`, `--include-open`,
+`--ids`, `--kinds`.
 
-Pick how a restore lands, per run or as a default:
+### Modes
 
-| Mode | Result | Set per run | Persist |
-| --- | --- | --- | --- |
-| `tabs` (default) | every session as a tab in your current terminal window | `--tabs` | `encore config mode tabs` |
-| `windows` | one window per session (Windows Terminal `new-window`) | `--windows` | `encore config mode windows` |
-| `background` | no terminal at all — sessions run headless, reached with `claude attach <id>` | `--background` | `encore config mode background` |
+| Mode | Result |
+| --- | --- |
+| `tabs` (default) | a tab per session in your current terminal window |
+| `windows` | one window per session |
+| `background` | no terminal; sessions run headless, reached with `claude attach <id>` |
 
-`background` is the quietest: nothing pops up, and `encore restore --background`
-prints the `claude attach` line for each session it starts. Resuming a session
-that is already running in the background starts a *copy* rather than stealing
-the original — the same rule the CLI applies.
+Set per run with `--mode`/`--tabs`/`--windows`/`--background`, persist with
+`encore config mode ...`. Resuming a session that is already running in the
+background starts a copy rather than stealing the original.
 
-`tabs` relies on Windows 11's default-terminal delegation. `windows` uses
-Windows Terminal's CLI; if your Terminal build ignores the trailing command (the
-window opens but the shell stays empty) Encore detects it and falls back to plain
-windows, warning once per run.
+`windows` uses Windows Terminal's CLI; if your build ignores the trailing
+command, Encore detects the empty tab and falls back to a plain window.
 
-Sessions that are **still running are skipped**, so running `encore restore`
-from inside a live Claude Code session never forks the conversation out from
-under you. Use `--include-open` to override.
+### Resume prompt
 
-Encored sessions resume with a one-line prompt, `Continue from where you left
-off.`, because Claude Code's interactive `--resume` currently refuses to load a
-session whose transcript ends on an unresolved tool marker. Change or drop the
-prompt with `--prompt "text"` / `--no-prompt`.
-
-## Options
-
-```
---since 30m|12h|2d|7d|1w    how far back to look (default 7d)
---project <dir>             restrict to a folder and its subfolders
---limit <n>                 cap the number of sessions
---only 1,3 / --only 3fa9c1  pick by row number or session-id prefix
---dry-run                   print, do not launch
---prompt <text>             prompt sent on resume
---no-prompt                 resume without sending a turn
---include-open              also reopen sessions that are still running
---mode tabs|windows|background   restore mode for this run
---tabs / --windows / --background  shorthand for --mode
---yolo                      add --dangerously-skip-permissions
---wt                        force Windows Terminal instead of a new console
---window                    new window rather than tab (with --wt)
---kinds interactive,bg      session kinds to consider
-```
+Encored sessions send `Continue from where you left off.`, because interactive
+`--resume` refuses to load a session whose transcript ends on an unresolved tool
+marker. Change it with `--prompt "text"`, drop it with `--prompt ""`.
 
 ## How it works
 
-Two sources feed the candidate list:
-
-1. `%LOCALAPPDATA%\Encore\snapshots\*.json` — written by `encore save` and by
-   the autosave task from `claude agents --json`. Snapshots protect the record
-   from Claude Code's startup cleanup, which prunes its own session registry.
-2. `~/.claude/sessions\*.json` — Claude Code's own per-process records, which
-   survive a reboot and carry folder and session id.
-
-Each candidate resumes with a plain `claude --resume <id>` in its original
-folder, in a new console (which Windows 11 opens as a Windows Terminal tab) or
-a Windows Terminal tab with `--wt`. Surviving sessions are detected by session
-id, PID and start time. Nothing is written to your transcripts; nothing leaves
-the machine.
+Candidates come from the newest snapshot in `%LOCALAPPDATA%\Encore\snapshots`
+(protects the record from Claude Code's own startup cleanup) and from
+`~/.claude/sessions\*.json`, which survives a reboot. Each one resumes with
+`claude --resume <id>` in its own folder; liveness is checked per session id and
+PID. Nothing leaves the machine and no transcript is written.
 
 ## Limitations
 
-- Interactive CLI sessions only. `claude -p`, SDK, IDE, Desktop and background
-  sessions are tracked separately and hidden by default.
-- Session order and window geometry are not preserved — new tabs appear in a
-  sensible but arbitrary order.
-- `claude agents --json` is used for liveness. Sessions started by another
-  process may not appear there on some builds; `--include-open` is the escape
-  hatch if a restore ever skips one session too many.
-- Flags that were not stored with the session (`--mcp-config`, `--add-dir`,
-  `--settings`, `--plugin-dir`, `--fallback-model`) are not re-applied.
-- Sessions older than `cleanupPeriodDays` (default 30) may already be deleted.
+- Interactive CLI sessions only (`--kinds bg` to include background ones).
+- Tab order and window geometry are not preserved.
+- Flags not stored with a session (`--add-dir`, `--mcp-config`, `--settings`,
+  `--plugin-dir`, `--fallback-model`) are not re-applied.
+- `claude stop` deletes the session record, so a stopped session only restores
+  from an older snapshot.
 
 ## Testing
 
-`tests\smoke.ps1` runs the whole loop against a throwaway session with a cheap
-model: real model call, real snapshot, real resume, real tab, real cleanup.
+`tests\smoke.ps1` exercises the whole loop against a throwaway session with a
+cheap model — real model call, real snapshot, real resume, real cleanup. Run it
+after changes:
 
 ```powershell
-git clone <this repo> C:\Tools\Encore
-cd C:\Tools\Encore
 .\tests\smoke.ps1
 ```
-
-It creates `.test\smoke` inside the repo. That folder has to be trusted once;
-the script says so and stops if it is not.
-
-## Uninstall
-
-```powershell
-encore uninstall
-```
-
-Snapshots stay in `%LOCALAPPDATA%\Encore` — delete the folder to remove them.
 
 ## License
 

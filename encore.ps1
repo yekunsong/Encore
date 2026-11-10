@@ -30,13 +30,10 @@ function Exit-With { param([int]$Code, [string]$Message)
 
 function Get-Opt {
     param([string[]]$ArgList)
-    $o = @{}
+    $o = @{ '@' = @() }
     for ($i = 0; $i -lt $ArgList.Count; $i++) {
         $a = $ArgList[$i]
-        if ($a -notmatch '^--') {
-            $o["Positional$($o.Keys.Count)"] = $a
-            continue
-        }
+        if ($a -notmatch '^--') { $o['@'] += @($a); continue }
         $name = $a.Substring(2); $val = $true
         if ($name -match '^(?<k>[^=]+)=(?<v>.*)$') { $name = $Matches.k; $val = $Matches.v }
         elseif ($i + 1 -lt $ArgList.Count -and $ArgList[$i + 1] -notmatch '^--') { $val = $ArgList[$i + 1]; $i++ }
@@ -175,35 +172,27 @@ function Get-LiveSessions {
     }
 }
 
-function Get-DiskSessions {
-    <# Persisted session records. Survive a reboot; may be stale. #>
-    $dir = Join-Path (Get-ClaudeConfigDir) 'sessions'
-    if (-not (Test-Path -LiteralPath $dir)) { return @() }
-    foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
-        try { $s = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
-        if (-not $s.sessionId) { continue }
-        New-Entry $s
-    }
-}
-
 function Get-SnapshotFiles {
     if (-not (Test-Path -LiteralPath $script:SnapDir)) { return @() }
-    Get-ChildItem -LiteralPath $script:SnapDir -Filter '*.json' -File |
-        Sort-Object LastWriteTime -Descending
+    Get-ChildItem -LiteralPath $script:SnapDir -Filter '*.json' -File | Sort-Object LastWriteTime -Descending
 }
 
-function Get-LatestSnapshot {
-    $f = Get-SnapshotFiles | Select-Object -First 1
-    if (-not $f) { return $null }
-    try { return (Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json) } catch { return $null }
-}
-
-function Get-CandidateSessions {
-    <# Union of the newest snapshot and on-disk records, deduped by id. #>
+function Read-SessionRecords {
+    <# Every restorable record: on-disk ones plus the newest snapshot. #>
     $map = @{}
-    $snap = Get-LatestSnapshot
-    if ($snap) { foreach ($e in @($snap.entries)) { if ($e.id) { $map[[string]$e.id] = (New-Entry $e) } } }
-    foreach ($e in Get-DiskSessions) { $map[$e.id] = $e }
+    $snap = Get-SnapshotFiles | Select-Object -First 1
+    if ($snap) {
+        try { foreach ($e in @((Get-Content -LiteralPath $snap.FullName -Raw | ConvertFrom-Json).entries)) {
+            if ($e.id) { $map[[string]$e.id] = (New-Entry $e) }
+        } } catch { }
+    }
+    $dir = Join-Path (Get-ClaudeConfigDir) 'sessions'
+    if (Test-Path -LiteralPath $dir) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+            try { $s = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
+            if ($s.sessionId) { $map[[string]$s.sessionId] = (New-Entry $s) }
+        }
+    }
     $map.Values
 }
 
@@ -242,7 +231,7 @@ function Invoke-Save {
     $live = @(Get-LiveSessions | Where-Object { $kinds -contains $_.kind })
     if ($live.Count -eq 0) {
         $cut = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 600000
-        $live = @(Get-DiskSessions | Where-Object { $kinds -contains $_.kind -and $_.updatedAt -gt $cut })
+        $live = @(Read-SessionRecords | Where-Object { $kinds -contains $_.kind -and $_.updatedAt -gt $cut })
     }
     if ($live.Count -eq 0) { Exit-With 0 'nothing to snapshot' }
 
@@ -271,7 +260,7 @@ function Select-Candidates {
     $kinds = Resolve-Kinds ([string]$Opts['kinds'])
     $alive = Get-AliveKeySet
 
-    $items = @(Get-CandidateSessions | Where-Object {
+    $items = @(Read-SessionRecords | Where-Object {
         $_.id -and $_.cwd -and ($kinds -contains $_.kind) -and ($_.updatedAt -ge $cutoff)
     })
 
@@ -313,11 +302,8 @@ function New-LaunchCommand {
     $cwd = "'" + ($Entry.cwd -replace "'", "''") + "'"
     $flags = ''
     if ($Opts['yolo'] -eq $true) { $flags = ' --dangerously-skip-permissions' }
-    $prompt = ''
-    if ($Opts['no-prompt'] -ne $true) {
-        $text = if ($Opts['prompt']) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
-        $prompt = ' "' + ($text -replace '"', '\"') + '"'
-    }
+    $text = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
+    $prompt = if ($text) { ' "' + ($text -replace '"', '\"') + '"' } else { '' }
     $inner = "Set-Location -LiteralPath $cwd; claude --resume $($Entry.id)$flags$prompt"
     $title = if ($Entry.name) { $Entry.name } else { Split-Path -Leaf $Entry.cwd }
     if ($title.Length -gt 40) { $title = $title.Substring(0, 39) + [char]0x2026 }
@@ -326,12 +312,11 @@ function New-LaunchCommand {
         return [pscustomobject]@{ Kind = 'bg'; Inner = $inner; Argv = @() }
     }
 
-    $useWt = ($Opts['mode'] -eq 'windows' -or $Opts['wt'] -eq $true) -and
-             (Get-Command wt.exe -ErrorAction SilentlyContinue)
+    $useWt = ($Opts['mode'] -eq 'windows') -and (Get-Command wt.exe -ErrorAction SilentlyContinue)
     if (-not $useWt) {
         return [pscustomobject]@{ Kind = 'process'; Inner = $inner; Argv = @() }
     }
-    $mode = if ($Opts['mode'] -eq 'windows' -or $Opts['window'] -eq $true) { 'new-window' } else { 'new-tab' }
+    $mode = 'new-window'
     $argv = @('-w', '0', $mode, '-d', $Entry.cwd, '--title', "encore: $title", '--',
               'powershell.exe', '-NoExit', '-Command', $inner)
     return [pscustomobject]@{ Kind = 'wt'; Inner = $inner; Argv = $argv }
@@ -368,7 +353,7 @@ function Invoke-List {
 function Invoke-Restore {
     param($Opts)
     $Opts['mode'] = Resolve-Mode $Opts
-    $promptText = if ($Opts['prompt']) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
+    $promptText = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
 
     $items = @(Select-Candidates $Opts)
     if ($items.Count -eq 0) { Exit-With 0 'nothing to restore' }
@@ -439,42 +424,17 @@ function Invoke-Restore {
     Exit-With 0 ("reopened {0} session(s)" -f $opened)
 }
 
-function Invoke-Config {
-    param($Opts)
-    $key = $Opts['Positional0']
-    if (-not $key) {
-        $cfg = Get-Config
-        if (-not $cfg.Count) { Exit-With 0 'no config set (defaults: mode=tabs)'; }
-        foreach ($k in $cfg.Keys) { Write-Info ("{0} = {1}" -f $k, $cfg[$k]) }
-        exit 0
-    }
-    $value = $Opts['Positional1']
-    if (-not $value) {
-        $cfg = Get-Config
-        if ($cfg.ContainsKey($key)) { Exit-With 0 ("{0} = {1}" -f $key, $cfg[$key]) }
-        Exit-With 1 "no such key '$key'"
-    }
-    if ($key -eq 'mode' -and @('tabs', 'windows', 'background') -notcontains $value) {
-        Exit-With 1 "mode must be tabs | windows | background"
-    }
-    Set-ConfigKey $key $value
-    Exit-With 0 ("{0} = {1}" -f $key, $value)
-}
-
 function Invoke-Doctor {
-    $ok = $true
-    foreach ($c in 'claude', 'wt.exe', 'powershell.exe') {
+    $bad = $false
+    foreach ($c in 'claude', 'powershell.exe', 'wt.exe') {
         $found = Get-Command $c -ErrorAction SilentlyContinue
-        if ($found) { Write-Info ("[ok]   {0} -> {1}" -f $c, $found.Source) }
-        else { Write-Info ("[warn] {0} not found" -f $c); if ($c -eq 'claude') { $ok = $false } }
+        if ($found) { Write-Info "[ok]   $c" } else { Write-Info "[     ] $c"; if ($c -eq 'claude') { $bad = $true } }
     }
-    $live = @(Get-LiveSessions)
-    Write-Info ("[info] {0} live session(s) visible" -f $live.Count)
-    Write-Info ("[info] {0} snapshot(s) in {1}" -f @(Get-SnapshotFiles).Count, $script:SnapDir)
+    Write-Info ("[info] {0} live session(s), {1} snapshot(s), mode {2}" -f
+        @(Get-LiveSessions).Count, @(Get-SnapshotFiles).Count, (Resolve-Mode @{}))
     $task = Get-ScheduledTask -TaskName 'Encore-Autosave' -ErrorAction SilentlyContinue
-    if ($task) { Write-Info '[ok]   autosave task registered' }
-    else { Write-Info '[warn] autosave task not registered (run: encore install)' }
-    if (-not $ok) { exit 1 }
+    if ($task) { Write-Info '[ok]   autosave task' } else { Write-Info '[ ]    autosave task (run: encore install)' }
+    if ($bad) { exit 1 }
 }
 
 function Invoke-Install {
@@ -529,8 +489,24 @@ switch ($Command.ToLower()) {
     'doctor'    { Invoke-Doctor }
     'install'   { Invoke-Install $opts }
     'uninstall' { Invoke-Uninstall }
-    'config'    { Invoke-Config $opts }
-    'prune'     { Invoke-Prune; Exit-With 0 'pruned' }
+    'config' {
+        $pos = @($opts['@'])
+        if (-not $pos.Count) {
+            $cfg = Get-Config
+            if (-not $cfg.Count) { Exit-With 0 'no config set (default: mode = tabs)' }
+            foreach ($k in $cfg.Keys) { Write-Info ("{0} = {1}" -f $k, $cfg[$k]) }
+            exit 0
+        }
+        if ($pos.Count -eq 1) {
+            $cfg = Get-Config
+            Exit-With 0 ("{0} = {1}" -f $pos[0], $(if ($cfg.ContainsKey($pos[0])) { $cfg[$pos[0]] } else { '' }))
+        }
+        if ($pos[0] -eq 'mode' -and @('tabs', 'windows', 'background') -notcontains $pos[1]) {
+            Exit-With 1 'mode must be tabs | windows | background'
+        }
+        Set-ConfigKey $pos[0] $pos[1]
+        Exit-With 0 ("{0} = {1}" -f $pos[0], $pos[1])
+    }
     'version'   { Exit-With 0 "encore $script:Version" }
     default {
 @"
@@ -548,13 +524,11 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore uninstall                 undo install
 
 filters: --since 12h|2d|7d|1w  --project <dir>  --limit N  --include-open
-         --prompt "text" (sent on resume; default "Continue from where you left off.")
-         --no-prompt (resume without a turn)
+         --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode tabs|windows|background  (persist default: encore config mode ...)
          --tabs / --windows / --background  one-off mode override
-         --ids (show session ids in list)
-         --yolo (add --dangerously-skip-permissions)  --wt (force Windows Terminal)
-         --window (new window, affects --wt only)
+         --ids (show session ids in list)  --kinds (default interactive)
+         --yolo (add --dangerously-skip-permissions)
 "@ | Write-Host
     }
 }
