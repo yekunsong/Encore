@@ -166,7 +166,7 @@ they pick up immediately. Send none with `--prompt ""`.
 
 | Option | Meaning |
 | --- | --- |
-| `--since 30m\|12h\|2d\|1w` | how far back to look (default `7d`) |
+| `--since 30m\|12h\|2d\|1w` | how far back to look (default `24h`) |
 | `--project <dir>` | restrict to a folder and its subfolders |
 | `--limit <n>` | cap the number of sessions |
 | `--only 1,3` / `--only 3fa9c1` | pick by row number or id prefix |

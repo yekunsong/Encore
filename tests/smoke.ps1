@@ -182,6 +182,10 @@ finally {
 #    even after its window is closed
 #  - closing a launched window writes an end event (shell wrapper)
 #  - `encore close` marks a batch closed and it disappears from the list
+#  - subagent transcripts (agent-*) never appear as candidates
+#  - a live session's transcript does not leak back in through the
+#    transcript fallback
+#  - ordering is newest first, and --only is applied before the limit
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'SMOKE PASSED' -ForegroundColor Green; exit 0 }
 Write-Host "$fail check(s) failed" -ForegroundColor Red; exit 1

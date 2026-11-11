@@ -236,6 +236,7 @@ function Read-SessionRecords {
     $map = @{}
     $shutdowns = Get-ShutdownTimes
     $bootTime = Get-BootTime
+    $script:BootTime = $bootTime
     $horizon = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]([TimeSpan]::FromDays(30).TotalMilliseconds)
 
     $idx = Join-Path $script:AppDir 'index.jsonl'
@@ -324,51 +325,86 @@ function Test-SessionAlive {
 
 function Select-Candidates {
     param($Opts)
-    $since = if ($Opts['since']) { ConvertTo-TimeSpan ([string]$Opts['since']) } else { [TimeSpan]::FromDays(7) }
+    $since = if ($Opts['since']) { ConvertTo-TimeSpan ([string]$Opts['since']) } else { [TimeSpan]::FromHours(24) }
     $cutoff = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]$since.TotalMilliseconds
     $kinds = Resolve-Kinds ([string]$Opts['kinds'])
     $alive = Get-AliveKeySet
 
     if ($Opts['cut-window']) { $script:CutWindowSeconds = [int]$Opts['cut-window'] * 60 }
 
+    $horizon = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]([TimeSpan]::FromDays(30).TotalMilliseconds)
     $items = @(Read-SessionRecords | Where-Object {
         $_.id -and $_.cwd -and ($kinds -contains $_.kind) -and ($_.updatedAt -ge $cutoff)
     })
-    if ($Opts['any-state'] -ne $true) { $items = @($items | Where-Object { $_.cut }) }
 
     if ($Opts['project']) {
         $projRoot = ([string]$Opts['project']).TrimEnd('\', '/')
         $items = @($items | Where-Object { $_.cwd.TrimEnd('\', '/') -ieq $projRoot -or $_.cwd -ilike "$projRoot\*" })
     }
-    if ($Opts['include-open'] -ne $true) {
-        $items = @($items | Where-Object { -not (Test-SessionAlive $_ $alive) })
-    }
-    # sessions interrupted mid-turn first, then the freshest
-    $items = @($items | Sort-Object @{ Expression = { if ($_.idledAt -and $_.idledAt -ge $_.startedAt) { 1 } else { 0 } } },
-                                       @{ Expression = 'updatedAt'; Descending = $true })
-
-    # drop ids whose transcript is gone (removed sessions, dead index lines)
+    # drop ids whose transcript is gone; a transcript's mtime is the best
+    # available "last activity" for a session that recorded no events
     $projects = Join-Path (Get-ClaudeConfigDir) 'projects'
     if (Test-Path -LiteralPath $projects) {
         $known = @{}
         try {
             foreach ($f in [IO.Directory]::EnumerateFiles($projects, '*.jsonl', 'AllDirectories')) {
-                $known[[IO.Path]::GetFileNameWithoutExtension($f)] = $true
+                $known[[IO.Path]::GetFileNameWithoutExtension($f)] = $f
             }
         } catch { }
-        $items = @($items | Where-Object { $known.ContainsKey($_.id) })
+        # sessions with a transcript but no record at all (started before the
+        # hooks existed) are rebuilt from the transcript itself
+        $seen = @{}
+        foreach ($it in $items) { $seen[$it.id] = $true }
+        foreach ($id in $known.Keys) {
+            if ($seen.ContainsKey($id)) { continue }
+            if ($id -like 'agent-*') { continue }
+            try {
+                $mt = [DateTimeOffset](Get-Item -LiteralPath $known[$id]).LastWriteTimeUtc
+            } catch { continue }
+            if ($mt.ToUnixTimeMilliseconds() -lt $cutoff) { continue }
+            $cwd = ''
+            try {
+                foreach ($ln in (Get-Content -LiteralPath $known[$id] -TotalCount 40 -ErrorAction Stop)) {
+                    try { $o = $ln | ConvertFrom-Json } catch { continue }
+                    if ($o.cwd) { $cwd = [string]$o.cwd; break }
+                }
+            } catch { }
+            if (-not $cwd) { continue }
+            $items += [pscustomobject]@{
+                id = $id; cwd = $cwd; name = ''; kind = 'interactive'
+                startedAt = $mt.ToUnixTimeMilliseconds(); updatedAt = $mt.ToUnixTimeMilliseconds()
+                pid = 0; endedAt = 0; lastEvent = 'start'; idledAt = 0
+                cut = ($mt.ToUnixTimeMilliseconds() -lt $script:BootTime)
+            }
+        }
+
+        $items = @($items | Where-Object { $known.ContainsKey($_.id) } | ForEach-Object {
+            $mt = 0
+            try { $mt = [DateTimeOffset](Get-Item -LiteralPath $known[$_.id]).LastWriteTimeUtc } catch { }
+            if ($mt) {
+                $v = $mt.ToUnixTimeMilliseconds()
+                if ($v -gt $_.updatedAt) { $_.updatedAt = $v }
+            }
+            $_
+        })
     }
 
     $script:TotalCandidates = $items.Count
-    $limit = if ($Opts['all'] -eq $true) { 0 } elseif ($Opts['limit']) { [int]$Opts['limit'] } else { 30 }
-    if ($limit -gt 0) { $items = @($items | Select-Object -First $limit) }
-
     $script:MissingCwd = @()
-$script:CutWindowSeconds = 180
     $items = @($items | Where-Object {
         if (Test-Path -LiteralPath $_.cwd -PathType Container) { $true }
         else { $script:MissingCwd += $_.cwd; $false }
     })
+
+    if ($Opts['any-state'] -ne $true) { $items = @($items | Where-Object { $_.cut }) }
+    if ($Opts['include-open'] -ne $true) {
+        $items = @($items | Where-Object { -not (Test-SessionAlive $_ $alive) })
+    }
+
+    # freshest first; a session interrupted mid-turn only breaks ties
+    $items = @($items | Sort-Object `
+        @{ Expression = { [int64]$_.updatedAt }; Descending = $true },
+        @{ Expression = { if ($_.idledAt -and $_.idledAt -ge $_.startedAt) { 1 } else { 0 } } })
 
     if ($Opts['only']) {
         $picked = @()
@@ -383,6 +419,9 @@ $script:CutWindowSeconds = 180
         }
         $items = @($picked)
     }
+
+    $limit = if ($Opts['all'] -eq $true) { 0 } elseif ($Opts['limit']) { [int]$Opts['limit'] } else { 30 }
+    if ($limit -gt 0) { $items = @($items | Select-Object -First $limit) }
     return $items
 }
 
@@ -746,7 +785,7 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore install                   put encore on PATH and register the hook
   encore uninstall                 undo install
 
-filters: --since 12h|2d|7d|1w  --project <dir>  --limit N (default 30)  --all  --include-open
+filters: --since 30m|12h|2d|7d (default 24h)  --project <dir>  --limit N (default 30)  --all  --include-open
          --any-state (also list sessions you closed on purpose)  --cut-window <minutes>
          --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode window|tabs|windows|background  (default window; --tabs/--windows/--background)
