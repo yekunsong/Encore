@@ -300,6 +300,7 @@ function Read-SessionRecords {
             $rec.cut = ($rec.updatedAt -lt $bootTime)
         }
     }
+    $script:EventState = $map
     $map.Values
 }
 
@@ -365,6 +366,7 @@ function Select-Candidates {
                 $mt = [DateTimeOffset](Get-Item -LiteralPath $known[$id]).LastWriteTimeUtc
             } catch { continue }
             if ($mt.ToUnixTimeMilliseconds() -lt $cutoff) { continue }
+            $st = $script:EventState[$id]
             $cwd = ''
             try {
                 foreach ($ln in (Get-Content -LiteralPath $known[$id] -TotalCount 40 -ErrorAction Stop)) {
@@ -374,11 +376,19 @@ function Select-Candidates {
             } catch { }
             if (-not $cwd) { continue }
             if ($projRoot -and -not ($cwd.TrimEnd('\', '/') -ieq $projRoot -or $cwd -ilike "$projRoot\*")) { continue }
+            $endedAt = if ($st) { $st.endedAt } else { 0 }
+            $idledAt = if ($st) { $st.idledAt } else { 0 }
+            $lastEv = if ($st) { $st.lastEvent } else { 'start' }
+            $cut = if ($lastEv -eq 'end') {
+                Test-WithinShutdown ([DateTimeOffset]::FromUnixTimeMilliseconds($endedAt)) $shutdowns
+            } else {
+                $mt.ToUnixTimeMilliseconds() -lt $script:BootTime
+            }
             $items += [pscustomobject]@{
                 id = $id; cwd = $cwd; name = ''; kind = 'interactive'
                 startedAt = $mt.ToUnixTimeMilliseconds(); updatedAt = $mt.ToUnixTimeMilliseconds()
-                pid = 0; endedAt = 0; lastEvent = 'start'; idledAt = 0
-                cut = ($mt.ToUnixTimeMilliseconds() -lt $script:BootTime)
+                pid = 0; endedAt = $endedAt; lastEvent = $lastEv; idledAt = $idledAt
+                cut = $cut
             }
         }
 
