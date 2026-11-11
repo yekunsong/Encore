@@ -17,7 +17,7 @@ Restore 2 session(s)? [Y/n] y
 reopened 2 session(s) in one new window
 ```
 
-每个会话都回到它原来的目录，对话内容原样带回来。仍在运行的会话会被跳过，不会把正在进行的对话分叉出去。
+每个会话都回到它原来的目录，对话内容原样带回来。只恢复**关机时仍然开着**的会话：你主动退出的不算，仍在运行的跳过，不会把正在进行的对话分叉出去。
 
 ---
 
@@ -104,7 +104,7 @@ encore restore --dry-run   # 3. 先看要执行的命令
 encore restore             # 4. 看计划、确认、恢复
 ```
 
-`encore list` 会给每行标 `open` 或 `closed`；`restore` 只对 `closed` 的行动手，并且**执行前会询问确认**（`--yes` 跳过）。默认最多展示 30 条并告知还有多少条匹配，要全部用 `--all`；`--dry-run` 只打印命令。
+`encore list` 会给每行标 `busy`、`idle`、`closed` 或 `open`。默认只处理被切断的会话（`busy` 是干到一半被切断、`idle` 是停在提示符时被切断，`closed` 表示你主动退出过）；要看主动退出的那些，加 `--any-state`。`restore` **执行前会询问确认**（`--yes` 跳过）。默认最多展示 30 条并告知还有多少条匹配，要全部用 `--all`；`--dry-run` 只打印命令。
 
 ## 日常流程
 
@@ -151,6 +151,8 @@ encore restore             # 4. 看计划、确认、恢复
 | `--yes` | 跳过确认 |
 | `--all` | 取消 30 条的默认上限 |
 | `--include-open` | 连仍在运行的会话也恢复 |
+| `--any-state` | 连主动退出的会话也列出/恢复 |
+| `--cut-window <分钟>` | 距关机多近的退出仍算"被切断"（默认 3） |
 | `--kinds interactive,background` | 参与的会话类型（默认 `interactive`） |
 | `--prompt "text"` | 恢复时发送的提示；`""` 表示不发送 |
 | `--yolo` | 附加 `--dangerously-skip-permissions` |
@@ -178,11 +180,21 @@ encore config                # -> mode = window
 encore config mode windows   # 保存为默认
 ```
 
-优先级：`--mode` 或简写参数 > `config` > `tabs`。配置文件是纯 JSON，位于 `%LOCALAPPDATA%\Encore\config.json`。
+优先级：`--mode` 或简写参数 > `config` > `window`。配置文件是纯 JSON，位于 `%LOCALAPPDATA%\Encore\config.json`。
 
 ## 工作原理
 
-Claude Code 会在会话进程死掉之后删除它的记录，所以副本必须在**关机之前**就存在。这条副本由 Encore 自己保存：`SessionStart` hook 在会话启动的瞬间，往 `%LOCALAPPDATA%\Encore\index.jsonl` 追加 `会话 id + 目录 + 类型 + 时间`。没有轮询、没有定时器，也就不存在"会话在间隙里消失"的窗口。
+Claude Code 会在会话进程死掉之后删除它的记录，所以副本必须在**关机之前**就存在。三个 hook 各写一行到 `%LOCALAPPDATA%\Encore\index.jsonl`：
+
+| hook | 写入的一行 |
+| --- | --- |
+| `SessionStart` | `start`，含会话 id、目录、类型、时间 |
+| `Stop` | `idle`——一轮结束，说明会话停在提示符上 |
+| `SessionEnd` | `end`，含 CLI 给出的原因 |
+
+最后一条是 `end` 的会话是主动退出的；从没等到 `end` 的，就是关机时还开着的。没有轮询、没有定时器，也就没有"会话在间隙里消失"的窗口。
+
+关机不一定等于强杀：Windows 会正常关闭控制台，这可能触发 `SessionEnd`。所以落在一次已记录的开关机前后几分钟内的 `end`，仍然算被切断（依据 `User32` 1074/1075、`EventLog` 6005/6006/6008/6009 时间戳）；容差用 `--cut-window` 调整。
 
 `restore` 读取索引和仍然有效的 `~/.claude/sessions\*.json`，剔除 transcript 已不存在的条目、目录已不存在的条目、以及仍在运行的条目，剩下的逐个执行：
 
@@ -234,6 +246,8 @@ Set-Location -LiteralPath '<目录>'; claude --resume <id> "<提示>"
 ## 限制
 
 - 默认只处理交互式 CLI 会话（加 `--kinds background` 可包含后台会话）。
+- 从没跑过 Claude 的终端（纯 PowerShell 标签）hook 看不到，恢复不了。
+- 读不到系统事件日志时会跳过关机校正，关机前几分钟内主动退出的会话可能被误算成切断。
 - 不保留标签顺序和窗口位置。
 - 会话未记录的参数（`--add-dir`、`--mcp-config`、`--settings`、`--plugin-dir`、`--fallback-model`）不会重放。
 - 关闭 hook 启动的会话只有实时记录，重启后会丢失。
@@ -246,6 +260,8 @@ encore.ps1        主命令行
 encore-hook.ps1   SessionStart hook（写索引）
 tests/smoke.ps1   端到端测试，真实模型调用，自行清理
 ```
+
+**状态：这一版的"切断判定"还没在真机上跑过。** 需要验证的用例列在 `tests\smoke.ps1` 末尾的 TODO 里，第一条是真机重启。
 
 `tests\smoke.ps1` 会用廉价模型跑一条一次性会话，覆盖完整链路：真实启动、真实写入索引、真实恢复、真实开终端、真实清理。运行前需要已安装 hook。
 

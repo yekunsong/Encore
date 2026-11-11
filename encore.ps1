@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $script:Version = '0.1.0'
 $script:AppDir = Join-Path $env:LOCALAPPDATA 'Encore'
 $script:MissingCwd = @()
+$script:CutWindowSeconds = 180
 
 # ---------------------------------------------------------------- helpers ---
 
@@ -184,33 +185,107 @@ function Add-IndexLine {
     if (-not $Id -or -not $Cwd) { return }
     New-Item -ItemType Directory -Force -Path $script:AppDir | Out-Null
     $line = [pscustomobject]@{
-        id = $Id; cwd = $Cwd
+        ev = 'start'; id = $Id; cwd = $Cwd
         kind = (ConvertTo-Kind $Kind)
-        startedAt = $(if ($StartedAt) { $StartedAt } else { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
+        ts = $(if ($StartedAt) { $StartedAt } else { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
         source = 'seed'
     } | ConvertTo-Json -Compress
     [IO.File]::AppendAllText((Join-Path $script:AppDir 'index.jsonl'), $line + "`n", (New-Object Text.UTF8Encoding($false)))
 }
 
-function Read-SessionRecords {
-    <# Every restorable record: hook index plus live on-disk records. #>
-    $map = @{}
-    $idx = Join-Path $script:AppDir 'index.jsonl'
-    if (Test-Path -LiteralPath $idx) {
-        foreach ($ln in (Get-Content -LiteralPath $idx -Tail 2000 -ErrorAction SilentlyContinue)) {
-            try { $r = $ln | ConvertFrom-Json } catch { continue }
-            if (-not $r.id) { continue }
-            $map[[string]$r.id] = [pscustomobject]@{
-                id = [string]$r.id; cwd = [string]$r.cwd; name = ''; kind = (ConvertTo-Kind ([string]$r.kind))
-                startedAt = ConvertTo-EpochMs $r.startedAt; updatedAt = ConvertTo-EpochMs $r.startedAt; pid = 0
-            }
+function Get-ShutdownTimes {
+    <# Timestamps of recent shutdowns/boots, for telling a cut-off session
+       from one the user closed on purpose right before shutting down. #>
+    $times = @()
+    try {
+        $filter = @{ LogName = 'System'; ProviderName = 'User32'; Id = 1074, 1075; StartTime = (Get-Date).AddDays(-7) }
+        foreach ($e in Get-WinEvent -FilterHashtable $filter -ErrorAction Stop) { $times += $e.TimeCreated.ToUniversalTime() }
+    } catch { }
+    try {
+        $filter = @{ LogName = 'System'; ProviderName = 'EventLog'; Id = 6005, 6006, 6008, 6009; StartTime = (Get-Date).AddDays(-7) }
+        foreach ($e in Get-WinEvent -FilterHashtable $filter -ErrorAction Stop) { $times += $e.TimeCreated.ToUniversalTime() }
+    } catch { }
+    $times
+}
+
+function Test-WithinShutdown {
+    param($When, $ShutdownTimes)
+    if (-not $When) { return $false }
+    $window = [int64]$script:CutWindowSeconds * 1000
+    foreach ($t in $ShutdownTimes) {
+        if ([Math]::Abs(([DateTimeOffset]$When).ToUnixTimeMilliseconds() - ([DateTimeOffset]$t).ToUnixTimeMilliseconds()) -le $window) {
+            return $true
         }
     }
+    return $false
+}
+
+function Read-SessionRecords {
+    <# One record per session, folded from the hook event log. Events decide
+       the state: a session whose last event is an end was closed on purpose
+       (unless the end sits inside a shutdown window), one that never ended was
+       open when the machine went down. #>
+    $map = @{}
+    $shutdowns = Get-ShutdownTimes
+    $horizon = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]([TimeSpan]::FromDays(30).TotalMilliseconds)
+
+    $idx = Join-Path $script:AppDir 'index.jsonl'
+    if (Test-Path -LiteralPath $idx) {
+        foreach ($ln in (Get-Content -LiteralPath $idx -Tail 6000 -ErrorAction SilentlyContinue)) {
+            try { $r = $ln | ConvertFrom-Json } catch { continue }
+            if (-not $r.id) { continue }
+            $id = [string]$r.id
+            $ev = if ($r.ev) { [string]$r.ev } else { 'start' }
+            $ts = ConvertTo-EpochMs $(if ($r.ts) { $r.ts } else { $r.startedAt })
+            if ($ts -lt $horizon) { continue }
+
+            $rec = $map[$id]
+            if (-not $rec) {
+                $rec = [pscustomobject]@{
+                    id = $id; cwd = ''; name = ''; kind = 'interactive'; startedAt = 0; updatedAt = 0
+                    pid = 0; endedAt = 0; lastEvent = ''; idledAt = 0; cut = $true
+                }
+                $map[$id] = $rec
+            }
+            switch ($ev) {
+                'start' {
+                    if ($r.cwd) { $rec.cwd = [string]$r.cwd }
+                    if ($r.kind) { $rec.kind = ConvertTo-Kind ([string]$r.kind) }
+                    if (-not $rec.startedAt) { $rec.startedAt = $ts }
+                    $rec.lastEvent = 'start'
+                }
+                'idle' { $rec.idledAt = $ts; if ($rec.lastEvent -ne 'start') { $rec.lastEvent = 'idle' } }
+                'end'   { $rec.endedAt = $ts; $rec.lastEvent = 'end' }
+            }
+            if ($ts -gt $rec.updatedAt) { $rec.updatedAt = $ts }
+        }
+    }
+
     $dir = Join-Path (Get-ClaudeConfigDir) 'sessions'
     if (Test-Path -LiteralPath $dir) {
         foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
             try { $s = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
-            if ($s.sessionId) { $map[[string]$s.sessionId] = (New-Entry $s) }
+            if (-not $s.sessionId) { continue }
+            $e = New-Entry $s
+            $rec = $map[$e.id]
+            if (-not $rec) {
+                $map[$e.id] = [pscustomobject]@{
+                    id = $e.id; cwd = $e.cwd; name = $e.name; kind = $e.kind; startedAt = $e.startedAt
+                    updatedAt = $e.updatedAt; pid = $e.pid; endedAt = 0; lastEvent = 'start'; idledAt = 0; cut = $true
+                }
+            } else {
+                if ($e.cwd) { $rec.cwd = $e.cwd }
+                if ($e.name) { $rec.name = $e.name }
+                if ($e.pid) { $rec.pid = $e.pid }
+            }
+        }
+    }
+
+    foreach ($rec in $map.Values) {
+        if ($rec.lastEvent -eq 'end') {
+            $rec.cut = (Test-WithinShutdown ([DateTimeOffset]::FromUnixTimeMilliseconds($rec.endedAt)) $shutdowns)
+        } else {
+            $rec.cut = $true
         }
     }
     $map.Values
@@ -243,9 +318,12 @@ function Select-Candidates {
     $kinds = Resolve-Kinds ([string]$Opts['kinds'])
     $alive = Get-AliveKeySet
 
+    if ($Opts['cut-window']) { $script:CutWindowSeconds = [int]$Opts['cut-window'] * 60 }
+
     $items = @(Read-SessionRecords | Where-Object {
         $_.id -and $_.cwd -and ($kinds -contains $_.kind) -and ($_.updatedAt -ge $cutoff)
     })
+    if ($Opts['any-state'] -ne $true) { $items = @($items | Where-Object { $_.cut }) }
 
     if ($Opts['project']) {
         $projRoot = ([string]$Opts['project']).TrimEnd('\', '/')
@@ -254,7 +332,9 @@ function Select-Candidates {
     if ($Opts['include-open'] -ne $true) {
         $items = @($items | Where-Object { -not (Test-SessionAlive $_ $alive) })
     }
-    $items = @($items | Sort-Object updatedAt -Descending)
+    # sessions interrupted mid-turn first, then the freshest
+    $items = @($items | Sort-Object @{ Expression = { if ($_.idledAt -and $_.idledAt -ge $_.startedAt) { 1 } else { 0 } } },
+                                       @{ Expression = 'updatedAt'; Descending = $true })
 
     # drop ids whose transcript is gone (removed sessions, dead index lines)
     $projects = Join-Path (Get-ClaudeConfigDir) 'projects'
@@ -273,6 +353,7 @@ function Select-Candidates {
     if ($limit -gt 0) { $items = @($items | Select-Object -First $limit) }
 
     $script:MissingCwd = @()
+$script:CutWindowSeconds = 180
     $items = @($items | Where-Object {
         if (Test-Path -LiteralPath $_.cwd -PathType Container) { $true }
         else { $script:MissingCwd += $_.cwd; $false }
@@ -319,12 +400,23 @@ function New-LaunchCommand {
     return [pscustomobject]@{ Kind = 'wt'; Inner = $inner; Argv = $argv }
 }
 
+function Get-StateLabel {
+    param($Entry, $Alive)
+    if (Test-SessionAlive $Entry $Alive) { return 'open' }
+    if ($Entry.cut) {
+        if ($Entry.idledAt -and $Entry.idledAt -ge $Entry.startedAt) { return 'idle' }
+        return 'busy'
+    }
+    return 'closed'
+}
+
 function Show-Plan {
     param($Items)
+    $alive = Get-AliveKeySet
     $i = 0
     foreach ($e in $Items) {
         $i++
-        '{0,3}  {1,4}  {2}  {3}' -f $i, (Format-Age $e.updatedAt), $e.cwd, $e.name
+        '{0,3}  {1,6}  {2,4}  {3}  {4}' -f $i, (Get-StateLabel $e $alive), (Format-Age $e.updatedAt), $e.cwd, $e.name
     }
 }
 
@@ -338,7 +430,7 @@ function Invoke-List {
     $i = 0
     foreach ($e in $items) {
         $i++
-        $state = if (Test-SessionAlive $e $alive) { 'open' } else { 'closed' }
+        $state = Get-StateLabel $e $alive
         $pre = if ($Opts['ids'] -eq $true) { $e.id.Substring(0, 8) } else { '' }
         '{0,3}  {1,6}  {2,4}  {3}  {4}  {5}' -f $i, $state, (Format-Age $e.updatedAt), $pre, $e.cwd, $e.name
     }
@@ -484,7 +576,9 @@ function Invoke-Doctor {
         $found = Get-Command $c -ErrorAction SilentlyContinue
         if ($found) { Write-Info "[ok]   $c" } else { Write-Info "[     ] $c"; if ($c -eq 'claude') { $bad = $true } }
     }
-    Write-Info ("[info] {0} live session(s), mode {1}" -f @(Get-LiveSessions).Count, (Resolve-Mode @{}))
+    $all = @(Read-SessionRecords)
+    Write-Info ("[info] {0} live, {1} cut-off, {2} closed, mode {3}" -f
+        @(Get-LiveSessions).Count, @($all | Where-Object { $_.cut }).Count, @($all | Where-Object { -not $_.cut }).Count, (Resolve-Mode @{}))
     $idx = Join-Path $script:AppDir 'index.jsonl'
     $lines = if (Test-Path -LiteralPath $idx) { @(Get-Content -LiteralPath $idx).Count } else { 0 }
     if ($lines) { Write-Info "[ok]   hook index has $lines record(s)" }
@@ -513,12 +607,28 @@ function Invoke-Install {
     $cfg = if (Test-Path -LiteralPath $settingsFile) { Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json } else { [pscustomobject]@{} }
     if (-not $cfg.PSObject.Properties['hooks']) { $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
     if (-not $cfg.hooks.PSObject.Properties['SessionStart']) { $cfg.hooks | Add-Member -NotePropertyName SessionStart -NotePropertyValue @() }
-    $entry = [pscustomobject]@{ matcher = 'startup|resume|fork'; hooks = @([pscustomobject]@{ type = 'command'; command = $hookCmd; timeout = 10 }) }
-    $already = @($cfg.hooks.SessionStart) | Where-Object { (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' }) }
-    if (-not $already) {
-        $cfg.hooks.SessionStart = @($cfg.hooks.SessionStart) + $entry
+    $wanted = @(
+        @{ event = 'SessionStart'; matcher = 'startup|resume|fork' },
+        @{ event = 'SessionEnd'; matcher = '*' },
+        @{ event = 'Stop'; matcher = '*' }
+    )
+    $added = 0
+    foreach ($w in $wanted) {
+        if (-not $cfg.hooks.PSObject.Properties[$w.event]) {
+            $cfg.hooks | Add-Member -NotePropertyName $w.event -NotePropertyValue @()
+        }
+        $exists = @($cfg.hooks.($w.event)) | Where-Object { (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' }) }
+        if (-not $exists) {
+            $cfg.hooks.($w.event) = @($cfg.hooks.($w.event)) + [pscustomobject]@{
+                matcher = $w.matcher
+                hooks = @([pscustomobject]@{ type = 'command'; command = $hookCmd; timeout = 10 })
+            }
+            $added++
+        }
+    }
+    if ($added) {
         [IO.File]::WriteAllText($settingsFile, ($cfg | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
-        Write-Info "registered SessionStart hook in $settingsFile"
+        Write-Info "registered $added hook(s) in $settingsFile"
     }
 
     $seeded = 0
@@ -536,10 +646,12 @@ function Invoke-Uninstall {
     if (Test-Path -LiteralPath $settingsFile) {
         try {
             $cfg = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            $ss = @($cfg.hooks.SessionStart) | Where-Object {
-                -not (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' })
+            foreach ($evn in 'SessionStart', 'SessionEnd', 'Stop') {
+                if (-not $cfg.hooks.PSObject.Properties[$evn]) { continue }
+                $cfg.hooks.($evn) = @(@($cfg.hooks.($evn)) | Where-Object {
+                    -not (@($_.hooks) | Where-Object { $_.command -like '*encore-hook.ps1*' })
+                })
             }
-            $cfg.hooks.SessionStart = @($ss)
             [IO.File]::WriteAllText($settingsFile, ($cfg | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
         } catch { Write-Warn "could not edit $settingsFile; remove the encore hook by hand" }
     }
@@ -597,6 +709,7 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore uninstall                 undo install
 
 filters: --since 12h|2d|7d|1w  --project <dir>  --limit N (default 30)  --all  --include-open
+         --any-state (also list sessions you closed on purpose)  --cut-window <minutes>
          --prompt "text" (sent on resume; default "Continue from where you left off.", "" = none)
          --mode window|tabs|windows|background  (default window; --tabs/--windows/--background)
          --yes (skip the confirmation)   --all (no 30-session cap)

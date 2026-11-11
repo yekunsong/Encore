@@ -60,7 +60,7 @@ try {
     Step 'stop the session and check it shows up as closed'
     claude stop $id | Out-Null
     Start-Sleep -Seconds 3
-    $listed = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m')) -join "`n"
+    $listed = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--any-state', '--since', '10m')) -join "`n"
     Check ($listed -match [regex]::Escape($id)) 'closed session appears in encore list'
     Check ($listed -match 'closed') 'it is reported as closed'
 
@@ -71,7 +71,7 @@ try {
             '","startedAt":' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '}'
     Add-Content -LiteralPath $index -Value $line -Encoding utf8
     try {
-        $withStale = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+        $withStale = (Invoke-Encore @('list', '--ids', '--kinds', 'background,interactive', '--any-state', '--since', '10m', '--project', $dir)) -join "`n"
     } finally {
         $kept = @(Get-Content -LiteralPath $index | Where-Object { $_ -notmatch $stale })
         [IO.File]::WriteAllText($index, ($kept -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
@@ -84,7 +84,7 @@ try {
     Check ($bgOnly -match [regex]::Escape($id)) 'a background session is still found with --kinds background'
 
     Step 'dry run plans the right command'
-    $plan = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    $plan = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--any-state', '--since', '10m', '--project', $dir)) -join "`n"
     if ($plan -notmatch "--resume $full") { Write-Host $plan }
     Check ($plan -match "--resume $full") 'plan resumes the right id'
     Check ($plan -match 'Continue from where you left off\.') 'plan sends the continuation prompt'
@@ -105,7 +105,7 @@ try {
     Step 'restore modes are configurable'
     $modes = @{}
     foreach ($m in 'window', 'tabs', 'windows', 'background') {
-        $modes[$m] = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+        $modes[$m] = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--mode', $m, '--kinds', 'background,interactive', '--any-state', '--since', '10m', '--project', $dir)) -join "`n"
     }
     Check ($modes['window'] -match 'wt\.exe -w -1 new-tab') 'window mode plans one new window with tabs'
     Check ($modes['tabs'] -match 'powershell -NoExit') 'tabs mode plans a console'
@@ -117,7 +117,7 @@ try {
 
     Step 'background mode restores without a terminal (real model call)'
     Start-Sleep -Seconds 3
-    $bgOut = (Invoke-Encore @('restore', '--yes', '--mode', 'background', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    $bgOut = (Invoke-Encore @('restore', '--yes', '--mode', 'background', '--only', $id, '--kinds', 'background,interactive', '--any-state', '--since', '10m', '--project', $dir)) -join "`n"
     $deadline = (Get-Date).AddSeconds(40)
     $bgRow = $null
     do {
@@ -139,7 +139,7 @@ try {
     }
 
     Step 'encore restore actually opens a resuming terminal'
-    Invoke-Encore @('restore', '--yes', '--include-open', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
+    Invoke-Encore @('restore', '--yes', '--include-open', '--only', $id, '--kinds', 'background,interactive', '--any-state', '--since', '10m', '--project', $dir) | Out-Null
     $proc = $null
     $deadline = (Get-Date).AddSeconds(60)
     do {
@@ -172,6 +172,12 @@ finally {
     }
 }
 
+# TODO (not yet exercised on this machine):
+#  - a session ended with `claude stop` is labelled `closed` and hidden by default
+#  - the same session is visible again with --any-state
+#  - a session killed with Stop-Process keeps no end event and stays `busy`/`idle`
+#  - an end event inside a shutdown window still counts as cut off
+#  - Stop hook marks a session idle after a finished turn
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'SMOKE PASSED' -ForegroundColor Green; exit 0 }
 Write-Host "$fail check(s) failed" -ForegroundColor Red; exit 1

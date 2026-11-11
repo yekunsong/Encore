@@ -18,8 +18,10 @@ Restore 2 session(s)? [Y/n] y
 reopened 2 session(s) in one new window
 ```
 
-Each session comes back in its own folder with its conversation intact. Sessions
-that are still running are skipped, so nothing gets forked out from under you.
+Each session comes back in its own folder with its conversation intact. Only
+sessions that were **still open when the machine went down** are restored:
+sessions you closed on purpose are left out, and sessions that are still running
+are skipped so nothing gets forked out from under you.
 
 ---
 
@@ -110,8 +112,11 @@ encore restore --dry-run   # 3. read the commands before running them
 encore restore             # 4. review the plan, confirm, reopen
 ```
 
-`encore list` marks each row `open` or `closed`. `restore` acts on `closed` rows
-only and **asks before launching** — `--yes` skips the question. It shows at most
+`encore list` marks each row `busy`, `idle`, `closed` or `open`. By default
+`restore` and `list` consider only **cut-off** sessions — `busy` and `idle` are
+cut off mid-work or while sitting at the prompt, `closed` means you exited it.
+`--any-state` brings the closed ones back into view. `restore` **asks before
+launching** — `--yes` skips the question. It shows at most
 30 sessions by default and tells you how many more matched; add `--all` for
 everything. `--dry-run` prints the exact commands instead.
 
@@ -165,6 +170,8 @@ they pick up immediately. Send none with `--prompt ""`.
 | `--yes` | skip the confirmation prompt |
 | `--all` | lift the 30-session default cap |
 | `--include-open` | also reopen sessions that are still running |
+| `--any-state` | include sessions you closed on purpose |
+| `--cut-window <minutes>` | how close to a shutdown an exit still counts as cut off (default 3) |
 | `--kinds interactive,background` | session kinds to consider (default `interactive`) |
 | `--prompt "text"` | prompt sent on resume; `""` resumes with no turn |
 | `--yolo` | add `--dangerously-skip-permissions` |
@@ -196,16 +203,29 @@ encore config                # -> mode = window
 encore config mode windows   # persist a default
 ```
 
-Precedence: `--mode` / shorthand flag, then `config`, then `tabs`. The file is
+Precedence: `--mode` / shorthand flag, then `config`, then `window`. The file is
 plain JSON at `%LOCALAPPDATA%\Encore\config.json`.
 
 ## How it works
 
 Claude Code deletes a session's live record once its process is dead, so a copy
-has to exist *before* the machine goes down. Encore keeps that copy itself: a
-`SessionStart` hook appends `session id + folder + kind + time` to
-`%LOCALAPPDATA%\Encore\index.jsonl` the instant a session starts. No polling, no
-timer, no window in which a session can vanish.
+has to exist *before* the machine goes down. Three hooks keep it, appending one
+line each to `%LOCALAPPDATA%\Encore\index.jsonl`:
+
+| Hook | Line |
+| --- | --- |
+| `SessionStart` | `start` with session id, folder, kind and time |
+| `Stop` | `idle` — a turn finished, so the session was sitting at the prompt |
+| `SessionEnd` | `end` with the CLI's reason |
+
+A session whose last event is an `end` was closed on purpose; one that never got
+an `end` was open when the machine went down. No polling, no timer, no window in
+which a session can vanish.
+
+Shutdowns are not always a hard kill: Windows closes consoles cleanly, which can
+fire `SessionEnd`. So an `end` that lands within a few minutes of a logged
+shutdown (`User32` 1074/1075, `EventLog` 6005/6006/6008/6009) is still treated
+as cut off; `--cut-window` sets that tolerance.
 
 `restore` reads the index plus the still-live `~/.claude/sessions\*.json`
 records, drops entries whose transcript file is gone, drops entries whose folder
@@ -268,6 +288,11 @@ restore time with `--project` / `--only`.
 
 - Interactive CLI sessions only by default (`--kinds background` to include
   background ones).
+- Terminals that never ran Claude (a bare PowerShell tab) are invisible to hooks
+  and cannot be restored.
+- Without access to the system event log the shutdown correction is skipped, so
+  sessions closed in the last minutes before a shutdown may be miscounted as
+  closed.
 - Tab order and window geometry are not preserved.
 - Flags not stored with a session (`--add-dir`, `--mcp-config`, `--settings`,
   `--plugin-dir`, `--fallback-model`) are not re-applied.
@@ -283,6 +308,10 @@ encore.ps1        main CLI
 encore-hook.ps1   SessionStart hook (index writer)
 tests/smoke.ps1   end-to-end test with real model calls; cleans up after itself
 ```
+
+**Status: the cut-off detection in this revision has not been run on real
+hardware yet.** The TODO list at the bottom of `tests\smoke.ps1` names the cases
+that still need verifying, starting with a real reboot.
 
 `tests\smoke.ps1` drives the whole loop against a throwaway session on a cheap
 model — real session start, real hook record, real resume, real terminal, real
