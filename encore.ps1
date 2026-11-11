@@ -355,9 +355,12 @@ function Select-Candidates {
         # hooks existed) are rebuilt from the transcript itself
         $seen = @{}
         foreach ($it in $items) { $seen[$it.id] = $true }
+        $onlyKind = ($kinds -contains 'interactive')
+        $projRoot = if ($Opts['project']) { ([string]$Opts['project']).TrimEnd('\', '/') } else { '' }
         foreach ($id in $known.Keys) {
             if ($seen.ContainsKey($id)) { continue }
             if ($id -like 'agent-*') { continue }
+            if (-not $onlyKind) { continue }
             try {
                 $mt = [DateTimeOffset](Get-Item -LiteralPath $known[$id]).LastWriteTimeUtc
             } catch { continue }
@@ -370,6 +373,7 @@ function Select-Candidates {
                 }
             } catch { }
             if (-not $cwd) { continue }
+            if ($projRoot -and -not ($cwd.TrimEnd('\', '/') -ieq $projRoot -or $cwd -ilike "$projRoot\*")) { continue }
             $items += [pscustomobject]@{
                 id = $id; cwd = $cwd; name = ''; kind = 'interactive'
                 startedAt = $mt.ToUnixTimeMilliseconds(); updatedAt = $mt.ToUnixTimeMilliseconds()
