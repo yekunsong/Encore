@@ -104,7 +104,7 @@ encore restore --dry-run   # 3. 先看要执行的命令
 encore restore             # 4. 看计划、确认、恢复
 ```
 
-`encore list` 会给每行标 `busy`、`idle`、`closed` 或 `open`。默认只处理被切断的会话（`busy` 是干到一半被切断、`idle` 是停在提示符时被切断，`closed` 表示你主动退出过）；要看主动退出的那些，加 `--any-state`。`restore` **执行前会询问确认**（`--yes` 跳过）。默认最多展示 30 条并告知还有多少条匹配，要全部用 `--all`；`--dry-run` 只打印命令。
+`encore list` 会给每行标 `busy`、`idle`、`closed` 或 `open`。默认只处理被切断的会话（`busy` 是干到一半被切断、`idle` 是停在提示符时被切断，`closed` 表示你主动退出过）；要看主动退出的那些，加 `--any-state`；`encore close` 可批量标记为已关闭，适合清理重启后不再需要的积压。`restore` **执行前会询问确认**（`--yes` 跳过）。默认最多展示 30 条并告知还有多少条匹配，要全部用 `--all`；`--dry-run` 只打印命令。
 
 ## 日常流程
 
@@ -135,6 +135,7 @@ encore restore             # 4. 看计划、确认、恢复
 | `encore restore --dry-run` | 只打印命令，不启动 |
 | `encore config` | 查看已保存的配置 |
 | `encore config mode windows` | 保存默认恢复方式 |
+| `encore close [筛选]` | 把被切断的会话标记为已关闭（清理积压） |
 | `encore doctor` | 检查安装状态：`claude`、PowerShell、索引、当前方式 |
 | `encore install` | 安装或刷新脚本、`PATH` 与 hook |
 | `encore uninstall` | 移除 `PATH` 与 hook（索引保留） |
@@ -192,7 +193,7 @@ Claude Code 会在会话进程死掉之后删除它的记录，所以副本必�
 | `Stop` | `idle`——一轮结束，说明会话停在提示符上 |
 | `SessionEnd` | `end`，含 CLI 给出的原因 |
 
-最后一条是 `end` 的会话是主动退出的；从没等到 `end` 的，就是关机时还开着的。没有轮询、没有定时器，也就没有"会话在间隙里消失"的窗口。
+最后一条是 `end` 的会话是主动退出的；没有 `end` 的，只有**在本次开机之前**启动的才算被切断——开机后自己开关过的会话不算。启动器还会在壳退出时补写一条 `end`，恢复出来的会话不会被反复捞回。没有轮询、没有定时器，也就没有"会话在间隙里消失"的窗口。
 
 关机不一定等于强杀：Windows 会正常关闭控制台，这可能触发 `SessionEnd`。所以落在一次已记录的开关机前后几分钟内的 `end`，仍然算被切断（依据 `User32` 1074/1075、`EventLog` 6005/6006/6008/6009 时间戳）；容差用 `--cut-window` 调整。
 

@@ -115,7 +115,9 @@ encore restore             # 4. review the plan, confirm, reopen
 `encore list` marks each row `busy`, `idle`, `closed` or `open`. By default
 `restore` and `list` consider only **cut-off** sessions — `busy` and `idle` are
 cut off mid-work or while sitting at the prompt, `closed` means you exited it.
-`--any-state` brings the closed ones back into view. `restore` **asks before
+`--any-state` brings the closed ones back into view. `encore close` marks a
+batch as closed — useful for the sessions a reboot left behind after you were
+done with them. `restore` **asks before
 launching** — `--yes` skips the question. It shows at most
 30 sessions by default and tells you how many more matched; add `--all` for
 everything. `--dry-run` prints the exact commands instead.
@@ -154,6 +156,7 @@ they pick up immediately. Send none with `--prompt ""`.
 | `encore restore --dry-run` | Print the commands, launch nothing |
 | `encore config` | Show the persisted configuration |
 | `encore config mode windows` | Persist a default restore mode |
+| `encore close [filters]` | Mark cut-off sessions as closed (clears the backlog) |
 | `encore doctor` | Check install state: `claude`, PowerShell, index, mode |
 | `encore install` | Install or refresh scripts, `PATH` entry and hook |
 | `encore uninstall` | Remove `PATH` entry and hook (the index is kept) |
@@ -218,8 +221,11 @@ line each to `%LOCALAPPDATA%\Encore\index.jsonl`:
 | `Stop` | `idle` — a turn finished, so the session was sitting at the prompt |
 | `SessionEnd` | `end` with the CLI's reason |
 
-A session whose last event is an `end` was closed on purpose; one that never got
-an `end` was open when the machine went down. No polling, no timer, no window in
+A session whose last event is an `end` was closed on purpose. One with no `end`
+counts as cut off only if it started before the current boot — a session you
+opened and closed again after the last boot was not taken by a shutdown. The
+launcher also writes an `end` when its shell exits, so restored sessions do not
+come back on the next run. No polling, no timer, no window in
 which a session can vanish.
 
 Shutdowns are not always a hard kill: Windows closes consoles cleanly, which can

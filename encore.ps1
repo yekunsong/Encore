@@ -208,6 +208,14 @@ function Get-ShutdownTimes {
     $times
 }
 
+function Get-BootTime {
+    <# Approximate UTC time of the last boot; a session alive before it was
+       cut off by that shutdown, whatever happened to it afterwards. #>
+    $grace = 120000
+    $ms = [Environment]::TickCount64
+    return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $ms - $grace
+}
+
 function Test-WithinShutdown {
     param($When, $ShutdownTimes)
     if (-not $When) { return $false }
@@ -227,6 +235,7 @@ function Read-SessionRecords {
        open when the machine went down. #>
     $map = @{}
     $shutdowns = Get-ShutdownTimes
+    $bootTime = Get-BootTime
     $horizon = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [int64]([TimeSpan]::FromDays(30).TotalMilliseconds)
 
     $idx = Join-Path $script:AppDir 'index.jsonl'
@@ -283,9 +292,11 @@ function Read-SessionRecords {
 
     foreach ($rec in $map.Values) {
         if ($rec.lastEvent -eq 'end') {
+            # closed on purpose, unless it happened as part of a shutdown
             $rec.cut = (Test-WithinShutdown ([DateTimeOffset]::FromUnixTimeMilliseconds($rec.endedAt)) $shutdowns)
         } else {
-            $rec.cut = $true
+            # never ended: only a survivor if it predates this boot
+            $rec.cut = ($rec.updatedAt -lt $bootTime)
         }
     }
     $map.Values
@@ -382,7 +393,8 @@ function New-LaunchCommand {
     if ($Opts['yolo'] -eq $true) { $flags = ' --dangerously-skip-permissions' }
     $text = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
     $prompt = if ($text) { ' "' + ($text -replace '"', '\"') + '"' } else { '' }
-    $inner = "Set-Location -LiteralPath $cwd; claude --resume $($Entry.id)$flags$prompt"
+    $self = Join-Path $script:AppDir 'bin\encore.ps1'
+    $inner = "Set-Location -LiteralPath $cwd; claude --resume $($Entry.id)$flags$prompt; & '$self' _end $($Entry.id)"
     $title = if ($Entry.name) { $Entry.name } else { Split-Path -Leaf $Entry.cwd }
     if ($title.Length -gt 40) { $title = $title.Substring(0, 39) + [char]0x2026 }
 
@@ -693,6 +705,31 @@ switch ($Command.ToLower()) {
         Set-ConfigKey $pos[0] $pos[1]
         Exit-With 0 ("{0} = {1}" -f $pos[0], $pos[1])
     }
+    'close'     {
+        $items = @(Select-Candidates $opts)
+        if ($items.Count -eq 0) { Exit-With 0 'nothing to close' }
+        Show-Plan $items
+        if ($opts['yes'] -ne $true) {
+            $a = 'y'
+            try { $a = Read-Host ("Mark {0} session(s) as closed? [Y/n]" -f $items.Count) } catch { }
+            if ($a -match '^\s*(n|no)\s*$') { Exit-With 0 'cancelled' }
+        }
+        $idx = Join-Path $script:AppDir 'index.jsonl'
+        foreach ($e in $items) {
+            $line = [pscustomobject]@{ ev = 'end'; id = $e.id; ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); reason = 'manual' } | ConvertTo-Json -Compress
+            [IO.File]::AppendAllText($idx, $line + "`n", (New-Object Text.UTF8Encoding($false)))
+        }
+        Exit-With 0 ("closed {0} session(s)" -f $items.Count)
+    }
+    '_end'      {
+        $eid = @($opts['@'])[0]
+        if ($eid) {
+            $line = [pscustomobject]@{ ev = 'end'; id = [string]$eid; ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); reason = 'shell' } | ConvertTo-Json -Compress
+            New-Item -ItemType Directory -Force -Path $script:AppDir | Out-Null
+            [IO.File]::AppendAllText((Join-Path $script:AppDir 'index.jsonl'), $line + "`n", (New-Object Text.UTF8Encoding($false)))
+        }
+        exit 0
+    }
     'version'   { Exit-With 0 "encore $script:Version" }
     default {
 @"
@@ -704,6 +741,7 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore restore --dry-run         print the commands only
   encore restore --mode background reopen with no terminal (claude attach <id>)
   encore config [key value]        show or set config (e.g. config mode windows)
+  encore close [filters]           mark cut-off sessions as closed (default: all now listed)
   encore doctor                    check the install
   encore install                   put encore on PATH and register the hook
   encore uninstall                 undo install

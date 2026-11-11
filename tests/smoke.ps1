@@ -178,6 +178,10 @@ finally {
 #  - a session killed with Stop-Process keeps no end event and stays `busy`/`idle`
 #  - an end event inside a shutdown window still counts as cut off
 #  - Stop hook marks a session idle after a finished turn
+#  - a session started after the last boot is not a restore candidate,
+#    even after its window is closed
+#  - closing a launched window writes an end event (shell wrapper)
+#  - `encore close` marks a batch closed and it disappears from the list
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'SMOKE PASSED' -ForegroundColor Green; exit 0 }
 Write-Host "$fail check(s) failed" -ForegroundColor Red; exit 1
