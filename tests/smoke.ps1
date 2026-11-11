@@ -84,7 +84,7 @@ try {
     Check ($bgOnly -match [regex]::Escape($id)) 'a background session is still found with --kinds background'
 
     Step 'dry run plans the right command'
-    $plan = (Invoke-Encore @('restore', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    $plan = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     if ($plan -notmatch "--resume $full") { Write-Host $plan }
     Check ($plan -match "--resume $full") 'plan resumes the right id'
     Check ($plan -match 'Continue from where you left off\.') 'plan sends the continuation prompt'
@@ -104,19 +104,20 @@ try {
 
     Step 'restore modes are configurable'
     $modes = @{}
-    foreach ($m in 'tabs', 'windows', 'background') {
-        $modes[$m] = (Invoke-Encore @('restore', '--dry-run', '--only', $id, '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    foreach ($m in 'window', 'tabs', 'windows', 'background') {
+        $modes[$m] = (Invoke-Encore @('restore', '--yes', '--dry-run', '--only', $id, '--mode', $m, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     }
+    Check ($modes['window'] -match 'wt\.exe -w -1 new-tab') 'window mode plans one new window with tabs'
     Check ($modes['tabs'] -match 'powershell -NoExit') 'tabs mode plans a console'
     Check ($modes['windows'] -match 'new-window') 'windows mode plans a new window'
     Check ($modes['background'] -match '--bg') 'background mode plans a headless resume'
     Invoke-Encore @('config', 'mode', 'background') | Out-Null
     Check (((Invoke-Encore @('config', 'mode')) -join ' ') -match 'background') 'mode persists in config'
-    Invoke-Encore @('config', 'mode', 'tabs') | Out-Null
+    Invoke-Encore @('config', 'mode', 'window') | Out-Null
 
     Step 'background mode restores without a terminal (real model call)'
     Start-Sleep -Seconds 3
-    $bgOut = (Invoke-Encore @('restore', '--mode', 'background', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
+    $bgOut = (Invoke-Encore @('restore', '--yes', '--mode', 'background', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir)) -join "`n"
     $deadline = (Get-Date).AddSeconds(40)
     $bgRow = $null
     do {
@@ -138,7 +139,7 @@ try {
     }
 
     Step 'encore restore actually opens a resuming terminal'
-    Invoke-Encore @('restore', '--include-open', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
+    Invoke-Encore @('restore', '--yes', '--include-open', '--only', $id, '--kinds', 'background,interactive', '--since', '10m', '--project', $dir) | Out-Null
     $proc = $null
     $deadline = (Get-Date).AddSeconds(60)
     do {

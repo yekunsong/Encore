@@ -10,10 +10,11 @@
 
 ```console
 $ encore restore
-2 session(s) to reopen [tabs mode]:
+2 session(s) to reopen [window mode]:
   1  12m  D:\work\api  api-refactor
   2   3h  D:\work\web  web-3
-reopened 2 session(s)
+Restore 2 session(s)? [Y/n] y
+reopened 2 session(s) in one new window
 ```
 
 每个会话都回到它原来的目录，对话内容原样带回来。仍在运行的会话会被跳过，不会把正在进行的对话分叉出去。
@@ -100,10 +101,10 @@ powershell -ExecutionPolicy Bypass -File .\encore.ps1 install
 encore doctor              # 1. 确认 claude、PowerShell、hook 都就位
 encore list                # 2. 看有哪些会话可以恢复（只列已关闭的）
 encore restore --dry-run   # 3. 先看要执行的命令
-encore restore             # 4. 全部恢复
+encore restore             # 4. 看计划、确认、恢复
 ```
 
-`encore list` 会给每行标 `open` 或 `closed`；`restore` 只对 `closed` 的行动手；`--dry-run` 会把每条 `claude --resume ...` 命令打印出来，方便先核对目录和 id。
+`encore list` 会给每行标 `open` 或 `closed`；`restore` 只对 `closed` 的行动手，并且**执行前会询问确认**（`--yes` 跳过）。默认最多展示 30 条并告知还有多少条匹配，要全部用 `--all`；`--dry-run` 只打印命令。
 
 ## 日常流程
 
@@ -147,6 +148,8 @@ encore restore             # 4. 全部恢复
 | `--project <dir>` | 限定某个目录及其子目录 |
 | `--limit <n>` | 限制条数 |
 | `--only 1,3` / `--only 3fa9c1` | 按行号或 id 前缀挑选 |
+| `--yes` | 跳过确认 |
+| `--all` | 取消 30 条的默认上限 |
 | `--include-open` | 连仍在运行的会话也恢复 |
 | `--kinds interactive,background` | 参与的会话类型（默认 `interactive`） |
 | `--prompt "text"` | 恢复时发送的提示；`""` 表示不发送 |
@@ -157,20 +160,21 @@ encore restore             # 4. 全部恢复
 
 | 方式 | 效果 |
 | --- | --- |
-| `tabs`（默认） | 在当前终端窗口里，每个会话一个标签 |
+| `window`（默认） | 新开**一个**终端窗口，每个会话就是里面一个标签 |
+| `tabs` | 在当前终端窗口里，每个会话一个标签 |
 | `windows` | 每个会话一个独立窗口 |
 | `background` | 完全不弹终端，会话在后台跑，用 `claude attach <id>` 接回 |
 
-单次用 `--mode <方式>` 或简写 `--tabs` / `--windows` / `--background` 指定。对已经在后台运行的会话再恢复，会起一个副本而不是抢占原件——和 CLI 自身的规则一致。
+单次用 `--mode <方式>` 或简写 `--tabs` / `--windows` / `--background` 指定；默认的 `window` 只新开一个窗口，不打扰现有终端。对已经在后台运行的会话再恢复，会起一个副本而不是抢占原件——和 CLI 自身的规则一致。
 
-`windows` 走 Windows Terminal 的命令行。部分 Terminal 版本会忽略跟在后面的命令、只开出空标签；Encore 几秒内会察觉并降级成普通控制台窗口，每轮只警告一次。
+`window` 和 `windows` 走 Windows Terminal 的命令行。部分 Terminal 版本会忽略跟在后面的命令、只开出空标签；Encore 几秒内会察觉并降级成普通控制台窗口，每轮只警告一次。
 
 ## 配置
 
-目前只有一个持久化键：
+目前只有一个持久化键（默认 `window`）：
 
 ```powershell
-encore config                # -> mode = tabs
+encore config                # -> mode = window
 encore config mode windows   # 保存为默认
 ```
 

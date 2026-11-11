@@ -10,10 +10,12 @@ Reopen the Claude Code sessions a reboot cut off — in one command.
 
 ```console
 $ encore restore
-2 session(s) to reopen [tabs mode]:
+2 session(s) to reopen [window mode]:
   1  12m  D:\work\api  api-refactor
   2   3h  D:\work\web  web-3
-reopened 2 session(s)
+
+Restore 2 session(s)? [Y/n] y
+reopened 2 session(s) in one new window
 ```
 
 Each session comes back in its own folder with its conversation intact. Sessions
@@ -105,12 +107,13 @@ Open a **new terminal** afterwards so the `PATH` change applies.
 encore doctor              # 1. confirm claude, PowerShell and the hook are in place
 encore list                # 2. see what is restorable (closed sessions only)
 encore restore --dry-run   # 3. read the commands before running them
-encore restore             # 4. reopen everything
+encore restore             # 4. review the plan, confirm, reopen
 ```
 
 `encore list` marks each row `open` or `closed`. `restore` acts on `closed` rows
-only, and `--dry-run` prints the exact `claude --resume ...` call per session, so
-you can check folders and ids first.
+only and **asks before launching** — `--yes` skips the question. It shows at most
+30 sessions by default and tells you how many more matched; add `--all` for
+everything. `--dry-run` prints the exact commands instead.
 
 ## Daily workflow
 
@@ -159,6 +162,8 @@ they pick up immediately. Send none with `--prompt ""`.
 | `--project <dir>` | restrict to a folder and its subfolders |
 | `--limit <n>` | cap the number of sessions |
 | `--only 1,3` / `--only 3fa9c1` | pick by row number or id prefix |
+| `--yes` | skip the confirmation prompt |
+| `--all` | lift the 30-session default cap |
 | `--include-open` | also reopen sessions that are still running |
 | `--kinds interactive,background` | session kinds to consider (default `interactive`) |
 | `--prompt "text"` | prompt sent on resume; `""` resumes with no turn |
@@ -169,24 +174,25 @@ they pick up immediately. Send none with `--prompt ""`.
 
 | Mode | Result |
 | --- | --- |
-| `tabs` (default) | a tab per session in your current terminal window |
+| `window` (default) | one **new** terminal window, a tab per session inside it |
+| `tabs` | a tab per session in your current terminal window |
 | `windows` | one window per session |
 | `background` | no terminal at all; sessions run headless and are reached with `claude attach <id>` |
 
 Choose per run with `--mode <mode>` or the shorthands `--tabs` / `--windows` /
-`--background`. Resuming a session that is already running in the background
+`--background`. `window` is the default: one new window, nothing else disturbed. Resuming a session that is already running in the background
 starts a *copy* instead of stealing the original — the same rule the CLI applies.
 
-`windows` goes through Windows Terminal's command line. Some Terminal builds
+`window` and `windows` go through Windows Terminal's command line. Some Terminal builds
 ignore the trailing command and open an empty tab; Encore notices within a few
 seconds and falls back to a plain console window, warning once per run.
 
 ## Configuration
 
-One persisted key today:
+One persisted key today (default `window`):
 
 ```powershell
-encore config                # -> mode = tabs
+encore config                # -> mode = window
 encore config mode windows   # persist a default
 ```
 
