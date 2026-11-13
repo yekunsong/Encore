@@ -142,7 +142,8 @@ The intended loop is short:
    caps it.
 
 Restored sessions get a one-line prompt, `Continue from where you left off.`, so
-they pick up immediately. Send none with `--prompt ""`.
+they pick up immediately. To only open them, set `encore config prompt none`
+once — or pass `--prompt ""` for a single run.
 
 ## Commands
 
@@ -199,11 +200,13 @@ seconds and falls back to a plain console window, warning once per run.
 
 ## Configuration
 
-One persisted key today (default `window`):
+Two persisted keys: `mode` (default `window`) and `prompt` (default
+`Continue from where you left off.`):
 
 ```powershell
 encore config                # -> mode = window
 encore config mode windows   # persist a default
+encore config prompt none    # open the sessions without sending a turn
 ```
 
 Precedence: `--mode` / shorthand flag, then `config`, then `window`. The file is

@@ -121,7 +121,7 @@ encore restore             # 4. 看计划、确认、恢复
 
 4. **只留需要的。** `encore restore --only 1,3` 只恢复这几行；`--since 2d` 或 `--project D:\work\api` 缩小范围；`--limit 5` 限制数量。
 
-恢复的会话会带一句 `Continue from where you left off.`，直接接着干。想不带这句，用 `--prompt ""`。
+恢复的会话会带一句 `Continue from where you left off.`，直接接着干。只想打开页面就设一次 `encore config prompt none`，或单次用 `--prompt ""`。
 
 ## 命令
 
@@ -174,11 +174,12 @@ encore restore             # 4. 看计划、确认、恢复
 
 ## 配置
 
-目前只有一个持久化键（默认 `window`）：
+目前有两个持久化键：`mode`（默认 `window`）与 `prompt`（默认 `Continue from where you left off.`）：
 
 ```powershell
 encore config                # -> mode = window
 encore config mode windows   # 保存为默认
+encore config prompt none    # 只打开页面，不发送任何内容
 ```
 
 优先级：`--mode` 或简写参数 > `config` > `window`。配置文件是纯 JSON，位于 `%LOCALAPPDATA%\Encore\config.json`。

@@ -102,6 +102,16 @@ function Resolve-Mode {
     return 'window'
 }
 
+function Resolve-PromptText {
+    param($Opts)
+    $cfg = Get-Config
+    $text = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] }
+            elseif ($cfg.ContainsKey('prompt')) { [string]$cfg['prompt'] }
+            else { 'Continue from where you left off.' }
+    if (@('none', 'off', '-') -contains $text) { return '' }
+    return $text
+}
+
 function Get-ClaudePath {
     $c = Get-Command claude -ErrorAction SilentlyContinue
     if (-not $c) { return $null }
@@ -535,7 +545,8 @@ function Invoke-WindowBatch {
 function Invoke-Restore {
     param($Opts)
     $Opts['mode'] = Resolve-Mode $Opts
-    $promptText = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
+    $promptText = Resolve-PromptText $Opts
+    $Opts['prompt'] = $promptText
 
     $items = @(Select-Candidates $Opts)
     if ($items.Count -eq 0) { Exit-With 0 'nothing to restore' }
@@ -793,7 +804,7 @@ encore $script:Version - reopen the Claude Code sessions a reboot cut off
   encore restore --only 1,3        reopen selected ones
   encore restore --dry-run         print the commands only
   encore restore --mode background reopen with no terminal (claude attach <id>)
-  encore config [key value]        show or set config (e.g. config mode windows)
+  encore config [key value]        show or set config (e.g. config mode tabs, config prompt none)
   encore close [filters]           mark cut-off sessions as closed (default: all now listed)
   encore doctor                    check the install
   encore install                   put encore on PATH and register the hook
