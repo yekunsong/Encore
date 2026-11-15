@@ -457,7 +457,10 @@ function New-LaunchCommand {
     $text = if ($Opts.ContainsKey('prompt')) { [string]$Opts['prompt'] } else { 'Continue from where you left off.' }
     $prompt = if ($text) { ' "' + ($text -replace '"', '\"') + '"' } else { '' }
     $self = Join-Path $script:AppDir 'bin\encore.ps1'
-    $inner = "Set-Location -LiteralPath $cwd; claude --resume $($Entry.id)$flags$prompt; & '$self' _end $($Entry.id)"
+    # Windows Terminal splits its own command line on ';', so the separators
+    # inside a shell command have to be escaped when we go through wt
+    $sep = if ($Opts['mode'] -eq 'windows' -or $Opts['mode'] -eq 'window' -or $Opts['wt'] -eq $true) { '\;' } else { ';' }
+    $inner = "Set-Location -LiteralPath $cwd$sep claude --resume $($Entry.id)$flags$prompt$sep & '$self' _end $($Entry.id)"
     $title = if ($Entry.name) { $Entry.name } else { Split-Path -Leaf $Entry.cwd }
     if ($title.Length -gt 40) { $title = $title.Substring(0, 39) + [char]0x2026 }
 
@@ -531,15 +534,18 @@ function Invoke-WindowBatch {
         $argv += @('new-tab', '-d', $e.cwd, '--title', "encore: $(if ($e.name) { $e.name } else { Split-Path -Leaf $e.cwd })", '--',
                    'powershell.exe', '-NoExit', '-Command', $c.Inner)
     }
+    $since = (Get-Date).AddSeconds(-1)
     & wt.exe $argv | Out-Null
-    $deadline = (Get-Date).AddSeconds(6)
-    $live = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    $started = $null
     do {
         Start-Sleep -Milliseconds 500
-        $live = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like "*--resume $($Items[0].id)*" }
-    } until ($live -or (Get-Date) -gt $deadline)
-    return [bool]$live
+        # the launcher shells carry the _end marker; their presence means
+        # Windows Terminal accepted the batch, even if claude is still booting
+        $started = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CreationDate -gt $since -and $_.CommandLine -like '*encore.ps1* _end*' }
+    } until ($started -or (Get-Date) -gt $deadline)
+    return [bool]$started
 }
 
 function Invoke-Restore {
